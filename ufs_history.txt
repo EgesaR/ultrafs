@@ -1,0 +1,40 @@
+#V2
+write toys.txt
+help
+spawn collection Toy_Collections
+link toys.txt Toy_Collections
+link toys.txt 'Toy_Collections'
+write task buy_coffee Bring milk
+write media engine_blueprint.mp4
+spawn workbench Research_Session
+focus Research_Session`
+focus Research_Session
+spawn collection Urgent_Tasks
+write task buy_coffee Bring milk
+link buy_coffee Urgent_Tasks
+graph
+focus Toy_Collections
+graph
+info toys.txt
+exit
+help
+list
+help spwan
+help spwan file test.txt
+spwan file test.txt
+spwan file
+spawn file test.txt
+spawn collection Mama_Coffee
+write sales.xls
+link sales.xls 'Mama_Coffee'
+link sales.xls Mama_Coffee
+focus Mama_Coffee
+ls
+list
+graph
+write task buy_coffee Bring milk
+list
+help
+exit
+list
+exit
