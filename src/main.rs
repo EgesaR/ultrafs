@@ -1,6 +1,8 @@
 mod core;
 mod graph;
 mod hardware;
+mod cache;
+mod fastcdc;
 
 use colored::*;
 use rustyline::DefaultEditor; // The powerful CLI controller
