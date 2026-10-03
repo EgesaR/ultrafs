@@ -38,3 +38,38 @@ help
 exit
 list
 exit
+write test.txt "hello world and beyond"
+list
+exit
+ls
+list
+python3 -c "with open('virtual_flash.img', 'r+b') as f: f.seek(4); f.write(b'\\xFF'*8)"
+exit
+clear
+exit
+list
+write note test_high random_string_with_high_variance_xyz123!@#$9876
+write note test_low Hello Hello Hello Hello Hello Hello Hello
+spawn workbench dev_session
+focus dev_session
+spawn collection assets
+graph
+write note io i love ui and so is that
+graph
+delete io --fail
+ingest document.txt The quick brown fox jumps over the lazy dog multiple times to test chunk distribution.
+stats
+exit
+spawn workbench my_test
+focus my_test
+write note test_data hello ultra fs
+list
+exit
+graph
+clear
+exit
+clear
+exit
+write note test_data hello ultra fs
+graph
+exit

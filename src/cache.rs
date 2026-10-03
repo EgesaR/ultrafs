@@ -11,6 +11,7 @@ pub enum CacheError {
     EntryTooLarge { requested: usize, capacity: usize },
 }
 
+#[allow(dead_code)]
 pub struct CacheEntry {
     compressed_data: Vec<u8>,
     uncompressed_len: usize,
@@ -22,6 +23,7 @@ pub struct CompressedLruCache<K> {
     current_bytes: usize,
 }
 
+#[allow(dead_code)]
 impl<K: Hash + Eq + Clone> CompressedLruCache<K> {
     pub fn new(max_bytes: usize) -> Self {
         Self {

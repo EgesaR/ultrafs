@@ -1,8 +1,10 @@
-use std::alloc::{alloc_zeroed, dealloc, Layout};
+use std::alloc::{Layout, alloc_zeroed, dealloc};
 use std::fs::OpenOptions;
 use std::io::{Read, Result, Seek, SeekFrom, Write}; // Added Read
 use std::os::unix::fs::OpenOptionsExt;
 use std::ptr::NonNull;
+
+use crate::hardware::sysfs::{StorageDeviceType, identify};
 
 pub const BLOCK_SIZE: usize = 4096;
 const MAGIC_SIGNATURE: &[u8; 4] = b"UFS!";
@@ -31,6 +33,16 @@ impl AlignedBlock {
     pub fn as_slice(&self) -> &[u8] {
         unsafe { std::slice::from_raw_parts(self.ptr.as_ptr(), BLOCK_SIZE) }
     }
+
+    // Safely copies sub-4KB chunks payloads into the hardware block and zeroes the rest
+    pub fn fill_from_chunk(&mut self, data: &[u8]) {
+        let buffer = self.as_mut_slice();
+        let len = data.len().min(BLOCK_SIZE);
+        buffer[..len].copy_from_slice(&data[..len]);
+        if len < BLOCK_SIZE {
+            buffer[len..].fill(0); // Zero-pad for O_DIRECT safety
+        }
+    }
 }
 
 impl Drop for AlignedBlock {
@@ -41,18 +53,33 @@ impl Drop for AlignedBlock {
 
 pub struct UltraStorage {
     pub device: std::fs::File,
+    pub _hardware_type: StorageDeviceType, // Store the detected hardware type
 }
 
 impl UltraStorage {
     pub fn open(path: &str) -> Result<Self> {
+        let hw_type = match identify(path) {
+            Ok(device) => {
+                println!(
+                    "[HARDWARE] Detected storage type: {} ({})",
+                    device.kind, device.bus
+                );
+                device.kind
+            }
+            Err(_) => {
+                // Fallback for virtual images like "virtual_flash.img"
+                StorageDeviceType::Other
+            }
+        };
+
         let file = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
-            .custom_flags(libc::O_DIRECT) 
+            .custom_flags(libc::O_DIRECT)
             .open(path)?;
-        
-        Ok(Self { device: file })
+
+        Ok(Self { device: file, _hardware_type: hw_type })
     }
 
     pub fn format_superblock(&mut self) -> Result<()> {

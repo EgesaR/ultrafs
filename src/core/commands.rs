@@ -1,17 +1,22 @@
+use bincode::Options; // Added to match the safe bounded serialization from main.rs
 use colored::*;
+use sha2::{Digest, Sha256};
+use std::io::Write;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::mpsc;
 use tokio::task;
 
 use crate::IoCommand;
+use crate::core::engine::UltraFSEngine;
 use crate::graph::metadata::{HashId, Node, SysAttributes};
 use crate::graph::state::FsState;
 use crate::hardware::allocator::BlockAllocator;
 use crate::hardware::compute::compute_l1_norm_avx256;
 use crate::hardware::storage::{AlignedBlock, BLOCK_SIZE};
+use crate::hardware::sysfs::identify;
 
-
+#[allow(dead_code)]
 pub fn hash_to_hex(hash: &HashId) -> String {
     hash.iter()
         .map(|b| format!("{:02x}", b))
@@ -47,8 +52,11 @@ fn inject_into_context(state: &mut FsState, target_hash: HashId) {
     }
 }
 
-// NEW: Calculates Shannon Entropy H(X) as per your flowchart
 fn calculate_entropy(data: &[u8]) -> f64 {
+    if data.is_empty() {
+        return 0.0;
+    }
+
     let mut counts = [0usize; 256];
     for &byte in data {
         counts[byte as usize] += 1;
@@ -69,6 +77,7 @@ pub async fn execute_command(
     state: &mut FsState,
     tx: &mpsc::Sender<IoCommand>,
     allocator: &Arc<BlockAllocator>,
+    engine: &mut UltraFSEngine,
 ) -> bool {
     let parts: Vec<&str> = line.trim().split_whitespace().collect();
     if parts.is_empty() {
@@ -119,13 +128,17 @@ pub async fn execute_command(
                 "Delete node (Triggers safety snapshot)"
             );
             println!(
+                "  {}                        : {}",
+                "clear".cyan(),
+                "Clear the terminal screen"
+            );
+            println!(
                 "  {}                        : {}\n",
                 "exit".cyan(),
                 "Save DAG to hardware and shutdown"
             );
         }
         "monitor" => {
-            // NEW: Asynchronous Server Dashboard Simulation
             println!(
                 "{}",
                 "\n📡 INITIALIZING ULTRAFS CONTINUOUS TELEMETRY..."
@@ -137,7 +150,6 @@ pub async fn execute_command(
             for i in 1..=3 {
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                 let active_nodes = state.nodes.len();
-                // We fake a TPS metric for visual effect
                 println!(
                     "  [T+{i}s] CPU Load: {}% | Active Nodes: {} | Hardware Blocks Free: {} | Sub-System Latency: {}ns",
                     (i * 12) % 100,
@@ -156,7 +168,7 @@ pub async fn execute_command(
                 "workbench" => Node::Workbench {
                     active_nodes: std::collections::HashSet::new(),
                     session_id: name.clone(),
-                    shared_env: std::collections::HashMap::new(), // Initialized empty env
+                    shared_env: std::collections::HashMap::new(),
                 },
                 "collection" => Node::Collection {
                     name: name.clone(),
@@ -350,8 +362,16 @@ pub async fn execute_command(
             let data_bytes = data_str.into_bytes();
             let logical_size = data_bytes.len() as u64;
 
-            // --- ENTROPY ROUTING LOGIC ---
             let entropy = calculate_entropy(&data_bytes);
+
+            // Hash the actual payload before `data_bytes` is moved into
+            // the blocking storage task below.
+            let mut content_hasher = Sha256::new();
+            content_hasher.update(&data_bytes);
+            let content_digest = content_hasher.finalize();
+            let mut content_hash = [0u8; 32];
+            content_hash.copy_from_slice(&content_digest);
+
             let mut is_latent = false;
 
             println!("{}", "\n[SYS] Analyzing payload entropy...".dimmed());
@@ -381,7 +401,6 @@ pub async fn execute_command(
             let task_allocator = allocator.clone();
             let (target_block_index, _distance, elapsed, target_block) =
                 task::spawn_blocking(move || {
-                    // LOCK-FREE ALLOCATION! No mutex blocking the threading pool
                     let target_block_index = task_allocator
                         .allocate()
                         .expect("CRITICAL ERROR: Disk is full!");
@@ -407,11 +426,13 @@ pub async fn execute_command(
                 .unwrap();
 
             let file_node = Node::File {
+                name: filename.clone(),
                 size: if is_latent {
                     logical_size / 8
                 } else {
                     logical_size
-                }, // Faking a compression reduction for the demo
+                },
+                hash: content_hash,
                 blocks: vec![target_block_index],
                 latent_seed: vec![0u8; 1024],
                 model_hash: [0u8; 32],
@@ -508,7 +529,9 @@ pub async fn execute_command(
                 }
 
                 if let Some(Node::File { blocks, .. }) = state.nodes.get(&hash) {
-                    allocator.free(blocks[0]);
+                    for &block_index in blocks {
+                        allocator.free(block_index);
+                    }
                 }
 
                 let removed_hash = state.index.remove(&filename).unwrap();
@@ -533,19 +556,143 @@ pub async fn execute_command(
                 state.snapshots.len().to_string().yellow()
             );
         }
+
+        "ingest" => {
+            if parts.len() < 3 {
+                println!("{} Usage: ingest <filename> <content>", "[ERROR]".red());
+                return true;
+            }
+
+            let filename = parts[1].to_string();
+            let content = parts[2..].join(" ");
+            let bytes = content.as_bytes();
+            let size = bytes.len();
+
+            println!(
+                "{}",
+                format!("[INGEST] Processing '{}' ({} bytes)...", filename, size).cyan()
+            );
+
+            // Generate the content hash using SHA-256.
+            let mut hasher = Sha256::new();
+            hasher.update(bytes);
+            let result = hasher.finalize();
+            let mut hash_id = [0u8; 32];
+            hash_id.copy_from_slice(&result);
+
+            // Create a complete DAG node for the ingested file.
+            // `hash` identifies the actual content, while
+            // `calculate_hash()` identifies the serialized DAG node.
+            let file_node = Node::File {
+                name: filename.clone(),
+                size: size as u64,
+                hash: hash_id,
+                blocks: Vec::new(),
+                latent_seed: Vec::new(),
+                model_hash: [0u8; 32],
+                attributes: SysAttributes {
+                    owner: "root".to_string(),
+                    permissions: "rwx------".to_string(),
+                    entropy_score: calculate_entropy(bytes),
+                    is_latent_quark: false,
+                    env_vars: std::collections::HashMap::new(),
+                },
+            };
+
+            let file_node_hash = file_node.calculate_hash();
+
+            // FsState::nodes is keyed by HashId. The filename is stored
+            // separately in the string -> HashId index.
+            state.nodes.insert(file_node_hash, file_node);
+            state.index.insert(filename.clone(), file_node_hash);
+
+            // Add the file to the currently focused Workbench/Collection.
+            inject_into_context(state, file_node_hash);
+
+            match engine.ingest_payload(bytes) {
+                Ok(dag_nodes) => {
+                    println!(
+                        "{}",
+                        format!("[SUCCESS] Created {} Merkle DAG nodes:", dag_nodes.len())
+                            .green()
+                            .bold()
+                    );
+
+                    for (idx, node) in dag_nodes.iter().enumerate() {
+                        println!(
+                            "  ├─ Chunk [{}]: Hash = {}... | Size = {} B",
+                            idx,
+                            &node.hash.to_string()[0..8],
+                            node.size
+                        );
+                    }
+                }
+                Err(e) => {
+                    eprintln!("{}", format!("[ERROR] Ingestion failed: {:?}", e).red());
+                }
+            }
+        }
+
+        "stats" => {
+            let (bytes_used, cached_chunks) = engine.cache_stats();
+            println!("{}", "=== RAM Cache Statistics ===".bright_blue());
+            println!("  Active Compressed Chunks : {}", cached_chunks);
+            println!("  Memory Footprint         : {} bytes", bytes_used);
+        }
+
+        "diskinfo" => {
+            if parts.len() < 2 {
+                println!(
+                    "{}",
+                    "Usage: diskinfo <device_path> (e.g., diskinfo /dev/sda)".yellow()
+                );
+                return true;
+            }
+
+            let path = parts[1];
+            match identify(path) {
+                Ok(device) => {
+                    println!("  type       : {}", device.kind);
+                    println!("  device     : {}", device.device_path.display());
+                    println!("  name       : {}", device.name);
+                    println!("  bus        : {}", device.bus);
+                    println!(
+                        "  model      : {}",
+                        device.model.as_deref().unwrap_or("unknown")
+                    );
+                    println!(
+                        "  vendor     : {}",
+                        device.vendor.as_deref().unwrap_or("unknown")
+                    );
+                    println!("  removable  : {}", device.removable);
+                    println!("  rotational : {}", device.rotational);
+                    println!("  sysfs      : {}", device.sysfs_path.display());
+                }
+                Err(err) => {
+                    eprintln!("{}", format!("[ERROR] Identify failed: {}", err).red());
+                }
+            }
+        }
+
+        "clear" => {
+            print!("\x1B[2J\x1B[1;1H");
+            std::io::stdout().flush().unwrap();
+        }
+
         "exit" => {
             println!(
                 "{}",
                 "[SYS] Serializing DAG State to persistent hardware...".yellow()
             );
 
-            match bincode::serialize(state) {
+            // Applying strictly bounded serialization to ensure exact payload length
+            let encoder = bincode::DefaultOptions::new().with_limit(10 * 1024 * 1024);
+            match encoder.serialize(state) {
                 Ok(encoded) => {
                     let total_bytes = encoded.len();
-                    // Calculate how many 4KB blocks we need (reserving Block 0 for the header)
                     let blocks_needed = (total_bytes + BLOCK_SIZE - 1) / BLOCK_SIZE;
 
-                    // 1. Write the payload chunks to Blocks 1 through N
+                    // 1. Write the payload chunks starting at Block 1
                     for (i, chunk) in encoded.chunks(BLOCK_SIZE).enumerate() {
                         let mut block = AlignedBlock::new();
                         let len = chunk.len();
@@ -574,6 +721,7 @@ pub async fn execute_command(
                     })
                     .await
                     .unwrap();
+
                     println!(
                         "{}",
                         format!(
@@ -589,6 +737,7 @@ pub async fn execute_command(
             }
             return false;
         }
+
         _ => println!("{}", "Unknown command. Type 'help' for options.".red()),
     }
     true

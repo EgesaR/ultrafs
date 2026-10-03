@@ -17,7 +17,9 @@ pub struct SysAttributes {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Node {
     File {
+        name: String,
         size: u64,
+        hash: HashId,
         blocks: Vec<u64>, 
         latent_seed: Vec<u8>,
         model_hash: HashId,
