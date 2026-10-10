@@ -19,37 +19,41 @@ impl CommandCompleter {
                 "focus".into(),
                 "link".into(),
                 "write".into(),
-                "monitor".into(),
-                "list".into(),
-                "graph".into(),
-                "delete".into(),
-                "exit".into(),
                 "ingest".into(),
-                "stats".into(),
+                "read".into(),
+                "cat".into(),
+                "rm".into(),
+                "delete".into(),
+                "checkpoint".into(),
+                "snap".into(),
+                "rollback".into(),
+                "undo".into(),
+                "monitor".into(),
                 "diskinfo".into(),
                 "info".into(),
+                "stats".into(),
+                "list".into(),
+                "graph".into(),
                 "clear".into(),
+                "exit".into(),
             ],
         }
     }
 }
 
-// 1. Implement Completer for Tab Prediction
 impl Completer for CommandCompleter {
     type Candidate = Pair;
 
     fn complete(
-        &self, // FIXME should be `&mut self`
+        &self,
         line: &str,
         pos: usize,
         _ctx: &Context<'_>,
     ) -> rustyline::Result<(usize, Vec<Pair>)> {
-        // Extract the word being typed
         let word = &line[..pos];
 
-        // Only trigger autocompletion for the first word (the command itself)
         if line.contains(' ') {
-            return Ok((0, Vec::new())); // No completion for arguments yet
+            return Ok((0, Vec::new()));
         }
 
         let mut matches = Vec::new();
@@ -66,7 +70,6 @@ impl Completer for CommandCompleter {
     }
 }
 
-// 2. Dummy implementations required by Rustyline's Helper trait
 impl Hinter for CommandCompleter {
     type Hint = String;
 }

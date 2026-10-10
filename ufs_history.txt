@@ -1,33 +1,4 @@
 #V2
-write toys.txt
-help
-spawn collection Toy_Collections
-link toys.txt Toy_Collections
-link toys.txt 'Toy_Collections'
-write task buy_coffee Bring milk
-write media engine_blueprint.mp4
-spawn workbench Research_Session
-focus Research_Session`
-focus Research_Session
-spawn collection Urgent_Tasks
-write task buy_coffee Bring milk
-link buy_coffee Urgent_Tasks
-graph
-focus Toy_Collections
-graph
-info toys.txt
-exit
-help
-list
-help spwan
-help spwan file test.txt
-spwan file test.txt
-spwan file
-spawn file test.txt
-spawn collection Mama_Coffee
-write sales.xls
-link sales.xls 'Mama_Coffee'
-link sales.xls Mama_Coffee
 focus Mama_Coffee
 ls
 list
@@ -72,4 +43,59 @@ clear
 exit
 write note test_data hello ultra fs
 graph
+exit
+write note hello.txt "Hello UltraFS! Testing FastCDC block reconstruction and 4KB sector hydration."
+read hello.txt
+ls
+list
+cat hello.txt
+write note repeated.txt "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+read repeated.txt
+ingest story.txt "UltraFS breaks this text into FastCDC deduplicated chunks using BLAKE3 cryptographic content addressing."
+read story.txt
+read ghost.txt
+exit
+ingest story.txt "UltraFS breaks this text into FastCDC deduplicated chunks using BLAKE3 cryptographic content addressing."
+write note repeated.txt "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+read ghost.txt
+read story.txt
+read repeated.txt
+exit
+read story.txt
+list
+history
+read story.txt
+exit
+write note repeated.txt "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+ingest story.txt "UltraFS breaks this text into FastCDC deduplicated chunks using BLAKE3 cryptographic content addressing."
+read repeated.txt
+read story
+read story.txt
+help
+monitor
+graph
+exit
+write note base.txt "This is the original file."
+checkpoint
+rm base.txt
+write note mistake.txt "This file was a mistake."
+ingest virus.bin "Bad payload data filling up physical sectors."
+list
+rollback
+list
+read base.txt
+exit
+write note test1.txt "Critical snapshot data"
+checkpoint
+rm test1.txt
+list
+rollback
+ls
+list
+ingest payload1.txt "Duplicate stream payload test for UltraFS Merkle DAG deduplication."
+ingest payload2.txt "Duplicate stream payload test for UltraFS Merkle DAG deduplication."
+write raw low_entropy.bin AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+read low_entropy.bin
+write raw high_entropy.bin f9a81c3b7e4d0281aef98421c900e21a48c61
+read high_entropy.bin
 exit

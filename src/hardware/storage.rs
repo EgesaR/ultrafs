@@ -79,7 +79,10 @@ impl UltraStorage {
             .custom_flags(libc::O_DIRECT)
             .open(path)?;
 
-        Ok(Self { device: file, _hardware_type: hw_type })
+        Ok(Self {
+            device: file,
+            _hardware_type: hw_type,
+        })
     }
 
     pub fn format_superblock(&mut self) -> Result<()> {

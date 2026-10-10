@@ -59,4 +59,25 @@ impl BlockAllocator {
         // Atomic Fetch-And: Clears the bit to 0 lock-free
         self.bitmap[byte_idx].fetch_and(mask, Ordering::SeqCst);
     }
+
+    /// Rebuilds the hardware allocator bitset based on active DAG block references.
+    /// Used during transactional rollbacks to prevent sector leaks or overwrites.
+    pub fn sync_from_refs(&self, active_blocks: impl Iterator<Item = u64>) {
+        // Clear all bits EXCEPT Block 0 (Superblock)
+        for i in 1..self.total_blocks as usize {
+            let byte_idx = i / 8;
+            let bit_idx = i % 8;
+            let mask = !(1 << bit_idx);
+            self.bitmap[byte_idx].fetch_and(mask, Ordering::SeqCst);
+        }
+
+        // Re-enable bits for every physical block securely reference in the DAG
+        for block_index in active_blocks {
+            let i = block_index as usize;
+            let byte_idx = i / 8;
+            let bit_idx = i % 8;
+            let mask = 1 << bit_idx;
+            self.bitmap[byte_idx].fetch_or(mask, Ordering::SeqCst);
+        }
+    }
 }

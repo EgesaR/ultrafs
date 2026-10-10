@@ -1,4 +1,5 @@
 mod cache;
+mod cli;
 mod core;
 mod fastcdc;
 mod graph;
@@ -12,7 +13,8 @@ use rustyline::{Config, Editor}; // The powerful CLI controller
 use std::sync::Arc; // Notice Mutex is completely gone for lock-free scaling!
 use tokio::sync::mpsc;
 
-use core::commands::execute_command;
+use crate::cli::execute_command;
+use crate::core::acm::AdaptiveConcurrencyManager;
 // 1. IMPORT THE ENGINE
 use core::UltraFSEngine;
 use graph::state::FsState;
@@ -25,6 +27,7 @@ pub enum IoCommand {
     WriteBlock { index: u64, block: AlignedBlock },
     SyncCache,
     Shutdown,
+    Sync, // Triggers an OS-level fsync
 }
 
 #[tokio::main]
@@ -139,14 +142,35 @@ async fn main() -> std::io::Result<()> {
         println!("[SUCCESS] Superblock formatted. Storage locked via O_DIRECT.");
     }
 
-    // Initialize the lock-free Atomic Bitset Allocator
+    // Initialize the block allocator.
     let global_allocator = Arc::new(BlockAllocator::new(2_097_152));
-    let (tx, mut rx) = mpsc::channel::<IoCommand>(1024);
+
+    // Initialize the shared adaptive concurrency manager.
+    let cpu_cores = std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1);
+
+    let concurrency = AdaptiveConcurrencyManager::new(cpu_cores);
+
+    // Initialize the I/O actor channel.
+    let (tx, rx) = mpsc::channel::<IoCommand>(1024);
+
+    println!(
+        "{}",
+        format!(
+            "[ACM] Adaptive concurrency initialized: {} CPU permits, {} I/O permits",
+            cpu_cores,
+            cpu_cores * 4
+        )
+        .cyan()
+    );
 
     // 2. INITIALIZE THE DEDUPLICATION ENGINE (16MB cache boundary)
     let mut engine = UltraFSEngine::new(16 * 1024 * 1024, global_allocator.clone(), tx.clone());
 
     let io_task = tokio::spawn(async move {
+        let mut rx = rx;
+
         while let Some(command) = rx.recv().await {
             match command {
                 IoCommand::WriteBlock { index, block } => {
@@ -156,7 +180,6 @@ async fn main() -> std::io::Result<()> {
                             format!("[IO-ACTOR] FATAL ERROR on Block {}: {}", index, e).red()
                         );
                     } else {
-                        // Only print if it's NOT the silent Block 0 exit write
                         if index != 0 {
                             println!(
                                 "{}",
@@ -166,7 +189,8 @@ async fn main() -> std::io::Result<()> {
                         }
                     }
                 }
-                IoCommand::SyncCache => println!(
+                // Handle both Sync and SyncCache identically
+                IoCommand::SyncCache | IoCommand::Sync => println!(
                     "{}",
                     "  -> [IO-ACTOR] Hardware cache synchronized.".yellow()
                 ),
@@ -224,8 +248,15 @@ async fn main() -> std::io::Result<()> {
                 rl.add_history_entry(line.as_str()).unwrap();
 
                 // 3. PASS THE ENGINE TO YOUR COMMAND EXECUTOR
-                let should_continue =
-                    execute_command(&line, &mut state, &tx, &global_allocator, &mut engine).await;
+                let should_continue = execute_command(
+                    &line,
+                    &mut state,
+                    &tx,
+                    &global_allocator,
+                    &mut engine,
+                    &concurrency,
+                )
+                .await;
 
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 

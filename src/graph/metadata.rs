@@ -1,6 +1,6 @@
 #![allow(dead_code)]
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use serde::{Serialize, Deserialize};
 
 pub type HashId = [u8; 32];
 
@@ -8,9 +8,9 @@ pub type HashId = [u8; 32];
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SysAttributes {
     pub owner: String,
-    pub permissions: String,      // e.g., "rxw-r--"
-    pub entropy_score: f64,       // Calculates H(X) from your Flowchart!
-    pub is_latent_quark: bool,    // True if compressed via AI generative path
+    pub permissions: String,               // e.g., "rxw-r--"
+    pub entropy_score: f64,                // Calculates H(X) from your Flowchart!
+    pub is_latent_quark: bool,             // True if compressed via AI generative path
     pub env_vars: HashMap<String, String>, // Private/Shared environment execution context
 }
 
@@ -20,7 +20,7 @@ pub enum Node {
         name: String,
         size: u64,
         hash: HashId,
-        blocks: Vec<u64>, 
+        blocks: Vec<u64>,
         latent_seed: Vec<u8>,
         model_hash: HashId,
         attributes: SysAttributes, // Hooking the attributes to the file

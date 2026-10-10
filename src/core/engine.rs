@@ -1,9 +1,11 @@
 use blake3::Hash;
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
 use std::{collections::HashMap, sync::Arc};
 use tokio::sync::mpsc::Sender;
 
 use crate::{
-    IoCommand, // To send writes to the background thread
+    IoCommand,
     cache::{CacheError, CompressedLruCache},
     fastcdc::FastCDC,
     hardware::allocator::BlockAllocator,
@@ -17,8 +19,8 @@ pub struct DagNode {
 
 #[warn(dead_code)]
 pub struct UltraFSEngine {
-    chunker: FastCDC,
-    ram_cache: CompressedLruCache<Hash>,
+    pub chunker: FastCDC,
+    pub ram_cache: CompressedLruCache<Hash>,
     // Optional: Keep track of all known chunks in this session/DAG
     node_registry: HashMap<Hash, usize>,
 
@@ -29,7 +31,7 @@ pub struct UltraFSEngine {
 }
 
 impl UltraFSEngine {
-    /// Initalizes the engine with the sub-4KB boundaries and bounded cache
+    /// Initializes the engine with sub-4KB boundaries and bounded cache
     pub fn new(
         cache_max_bytes: usize,
         allocator: Arc<BlockAllocator>,
@@ -39,8 +41,8 @@ impl UltraFSEngine {
             chunker: FastCDC::new(512, 2048, 4096),
             ram_cache: CompressedLruCache::new(cache_max_bytes),
             node_registry: HashMap::new(),
-            _allocator:allocator,
-            _io_tx:io_tx,
+            _allocator: allocator,
+            _io_tx: io_tx,
             disk_registry: HashMap::new(),
         }
     }
@@ -54,11 +56,10 @@ impl UltraFSEngine {
         for chunk in chunks {
             let slice = &data[chunk.offset..chunk.offset + chunk.length];
 
-            // 1. Genrate the cryptographic content address (Merkle Node ID)
+            // 1. Generate the cryptographic content address (Merkle Node ID)
             let hash = blake3::hash(slice);
 
             // 2. Block-Level Deduplication Check (RAM or Disk)
-            // If we already have this exact block, skip compression and caching
             if self.node_registry.contains_key(&hash) || self.disk_registry.contains_key(&hash) {
                 files_nodes.push(DagNode {
                     hash,
@@ -68,7 +69,6 @@ impl UltraFSEngine {
             }
 
             // 3. Compress and stage in the bounded LRU Cache
-            // Stage in RAM. (in the future, modify ram_cache.put to return evicted chunks)
             self.ram_cache.put(hash, slice)?;
             self.node_registry.insert(hash, chunk.length);
 
@@ -81,34 +81,39 @@ impl UltraFSEngine {
         Ok(files_nodes)
     }
 
-    /// Fetches a block from the RAM cache, falling back to physical storage if evicted
-    #[allow(dead_code)]
-    pub fn fetch_block(&mut self, block_index: u64) -> Result<Option<Vec<u8>>, CacheError> {
-        // 1. Check cache first (if caching key matches block index)
-        // (Assuming cache integration exists, otherwise fallback directly to disk)
+    /// Fetches a 4KB block by physical sector index.
+    /// Checks L1 RAM cache first, falls back to `virtual_flash.img` on a miss.
+    pub fn fetch_block(&mut self, block_index: u64) -> Result<Vec<u8>, String> {
+        // 1. L1 RAM Cache Hit (lookup hash mapped to this block index)
+        let block_hash = self
+            .disk_registry
+            .iter()
+            .find(|entry| *entry.1 == block_index)
+            .map(|(hash, _)| *hash);
 
-        // 2. Fallback to physical flash storage image
-        use std::fs::File;
-        use std::io::{Read, Seek, SeekFrom};
-
-        let mut file = match File::open("virtual_flash.img") {
-            Ok(f) => f,
-            Err(_) => return Ok(None),
-        };
-
-        const BLOCK_SIZE: u64 = 4096;
-        let offset = block_index * BLOCK_SIZE;
-
-        if file.seek(SeekFrom::Start(offset)).is_err() {
-            return Ok(None);
+        if let Some(hash) = block_hash {
+            if let Ok(Some(cached_data)) = self.ram_cache.get(&hash) {
+                return Ok(cached_data);
+            }
         }
 
-        let mut buf = vec![0u8; BLOCK_SIZE as usize];
-        match file.read_exact(&mut buf) {
-            Ok(_) => Ok(Some(buf)),
-            Err(_) => Ok(None),
-        }
+        // 2. L2 Hardware / Disk Fallback
+        let mut file = File::open("virtual_flash.img")
+            .map_err(|e| format!("Virtual flash disk offline or missing: {}", e))?;
+
+        const BLOCK_SIZE: usize = 4096;
+        let offset = block_index * (BLOCK_SIZE as u64);
+
+        file.seek(SeekFrom::Start(offset))
+            .map_err(|e| format!("Seek failure at block index {}: {}", block_index, e))?;
+
+        let mut buffer = vec![0u8; BLOCK_SIZE];
+        file.read_exact(&mut buffer)
+            .map_err(|e| format!("Read failure at block index {}: {}", block_index, e))?;
+
+        Ok(buffer)
     }
+
     /// Returns current cache pressure statistics
     pub fn cache_stats(&self) -> (usize, usize) {
         (self.ram_cache.current_bytes(), self.ram_cache.len())

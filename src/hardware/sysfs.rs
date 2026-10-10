@@ -62,6 +62,7 @@ pub enum BusType {
     Sata,
     Scsi,
     Mmio,
+    #[allow(dead_code)]
     Other,
     Unknown,
 }
@@ -108,22 +109,35 @@ pub struct StorageDevice {
 
 #[derive(Debug)]
 pub enum IdentifyError {
+    #[allow(dead_code)]
     NotLinux,
     InvalidDevicePath(PathBuf),
     NotBlockDevice(PathBuf),
     UnsupportedVirtualDevice(PathBuf),
-    Io { path: PathBuf, source: io::Error },
-    InvalidSysfsValue { path: PathBuf, value: String },
+    Io {
+        path: PathBuf,
+        source: io::Error,
+    },
+    InvalidSysfsValue {
+        path: PathBuf,
+        value: String,
+    },
 }
 
 impl fmt::Display for IdentifyError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NotLinux => f.write_str("storage-device-type currently supports Linux only"),
-            Self::InvalidDevicePath(path) => write!(f, "not a valid /dev device path: {}", path.display()),
+            Self::InvalidDevicePath(path) => {
+                write!(f, "not a valid /dev device path: {}", path.display())
+            }
             Self::NotBlockDevice(path) => write!(f, "not a block device: {}", path.display()),
             Self::UnsupportedVirtualDevice(path) => {
-                write!(f, "virtual/device-mapper block device is not a physical disk: {}", path.display())
+                write!(
+                    f,
+                    "virtual/device-mapper block device is not a physical disk: {}",
+                    path.display()
+                )
             }
             Self::Io { path, source } => write!(f, "failed to read {}: {}", path.display(), source),
             Self::InvalidSysfsValue { path, value } => {
@@ -176,7 +190,10 @@ pub fn identify<P: AsRef<Path>>(path: P) -> Result<StorageDevice, IdentifyError>
     if !class_link.exists() {
         return Err(IdentifyError::Io {
             path: class_link,
-            source: io::Error::new(io::ErrorKind::NotFound, "sysfs block-device entry not found"),
+            source: io::Error::new(
+                io::ErrorKind::NotFound,
+                "sysfs block-device entry not found",
+            ),
         });
     }
 
@@ -203,7 +220,7 @@ pub fn identify<P: AsRef<Path>>(path: P) -> Result<StorageDevice, IdentifyError>
     let kind = classify(disk_name.as_str(), bus, rotational, removable);
 
     Ok(StorageDevice {
-        _requested_path:requested_path,
+        _requested_path: requested_path,
         device_path,
         sysfs_path,
         name: disk_name,
@@ -247,7 +264,9 @@ fn resolve_whole_disk_sysfs(class_link: &Path, name: &str) -> Result<PathBuf, Id
     // A partition has a `partition` attribute and normally resolves to:
     // .../block/sda/sda1 or .../nvme0n1/nvme0n1p1. Its direct parent is the disk.
     if class_link.join("partition").exists() {
-        let parent = canonical.parent().ok_or_else(|| IdentifyError::InvalidDevicePath(canonical.clone()))?;
+        let parent = canonical
+            .parent()
+            .ok_or_else(|| IdentifyError::InvalidDevicePath(canonical.clone()))?;
         let parent_name = parent
             .file_name()
             .and_then(|x| x.to_str())
@@ -306,19 +325,34 @@ fn detect_bus(sysfs_path: &Path) -> BusType {
             .filter_map(|component| component.as_os_str().to_str().map(str::to_owned))
             .collect();
 
-        if components.iter().any(|c| c == "usb" || c.starts_with("usb")) {
+        if components
+            .iter()
+            .any(|c| c == "usb" || c.starts_with("usb"))
+        {
             return BusType::Usb;
         }
-        if components.iter().any(|c| c == "nvme" || c.starts_with("nvme")) {
+        if components
+            .iter()
+            .any(|c| c == "nvme" || c.starts_with("nvme"))
+        {
             return BusType::Nvme;
         }
-        if components.iter().any(|c| c == "ata" || c.starts_with("ata")) {
+        if components
+            .iter()
+            .any(|c| c == "ata" || c.starts_with("ata"))
+        {
             return BusType::Sata;
         }
-        if components.iter().any(|c| c == "mmio" || c.starts_with("mmio")) {
+        if components
+            .iter()
+            .any(|c| c == "mmio" || c.starts_with("mmio"))
+        {
             return BusType::Mmio;
         }
-        if components.iter().any(|c| c == "scsi" || c.starts_with("scsi")) {
+        if components
+            .iter()
+            .any(|c| c == "scsi" || c.starts_with("scsi"))
+        {
             return BusType::Scsi;
         }
     }
@@ -404,26 +438,41 @@ mod tests {
 
     #[test]
     fn classifies_nvme() {
-        assert_eq!(classify("nvme0n1", BusType::Nvme, false, false), StorageDeviceType::Nvme);
+        assert_eq!(
+            classify("nvme0n1", BusType::Nvme, false, false),
+            StorageDeviceType::Nvme
+        );
     }
 
     #[test]
     fn classifies_usb_flash() {
-        assert_eq!(classify("sdb", BusType::Usb, false, true), StorageDeviceType::UsbFlashDrive);
+        assert_eq!(
+            classify("sdb", BusType::Usb, false, true),
+            StorageDeviceType::UsbFlashDrive
+        );
     }
 
     #[test]
     fn classifies_external_hdd() {
-        assert_eq!(classify("sdb", BusType::Usb, true, false), StorageDeviceType::ExternalHdd);
+        assert_eq!(
+            classify("sdb", BusType::Usb, true, false),
+            StorageDeviceType::ExternalHdd
+        );
     }
 
     #[test]
     fn classifies_internal_hdd() {
-        assert_eq!(classify("sda", BusType::Sata, true, false), StorageDeviceType::Hdd);
+        assert_eq!(
+            classify("sda", BusType::Sata, true, false),
+            StorageDeviceType::Hdd
+        );
     }
 
     #[test]
     fn classifies_internal_ssd() {
-        assert_eq!(classify("sda", BusType::Sata, false, false), StorageDeviceType::Ssd);
+        assert_eq!(
+            classify("sda", BusType::Sata, false, false),
+            StorageDeviceType::Ssd
+        );
     }
 }
