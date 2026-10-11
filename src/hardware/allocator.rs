@@ -13,7 +13,7 @@ pub struct BlockAllocator {
 impl BlockAllocator {
     pub fn new(total_blocks: u64) -> Self {
         // Calculate how many bytes we need to store 'total_blocks' bits
-        let bytes_needed = ((total_blocks + 7) / 8) as usize;
+        let bytes_needed = total_blocks.div_ceil(8) as usize;
 
         // AtomicU8 does not implement Clone, so we initialize via repeat_with
         let bitmap: Vec<AtomicU8> = std::iter::repeat_with(|| AtomicU8::new(0))

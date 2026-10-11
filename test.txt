@@ -1867,3 +1867,28 @@ add features like
 Gemini is AI and can make mistakes.
 
 Adding Latent Seeds
+
+
+➜  src git:(main) ✗ cargo run
+   Compiling ultrafs v0.1.0 (/home/ray-644/Projects/ultrafs)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.37s
+     Running `/home/ray-644/Projects/ultrafs/target/debug/ultrafs`
+◆ UltraFS Initializing (Tokio Runtime + ACM Active)
+✓ Superblock formatted. Storage initialized.
+◆ Adaptive Concurrency Manager connected.
+[INFO] History not loaded: No such file or directory (os error 2)
+
+=======================================================
+ UltraFS Interactive Command Interface Online
+ Type help to see available commands.
+=======================================================
+
+ufs [Global]> exit
+◆ Persisting UltraFS state...
+└─ Queued 12 serialized bytes across 1 blocks
+✓ Filesystem persistence writes queued.
+[IO-ACTOR] Wrote storage block 1.
+[IO-ACTOR] Wrote storage block 0.
+[IO-ACTOR] Sync requested, but the physical flush API is not wired in.
+◆ Storage I/O actor shutting down.
+✓ UltraFS I/O actor stopped.

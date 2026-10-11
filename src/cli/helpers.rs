@@ -9,30 +9,29 @@ pub fn hash_to_hex(hash: &HashId) -> String {
 }
 
 pub fn inject_into_context(state: &mut FsState, target_hash: HashId) {
-    if state.active_context != "Global" {
-        if let Some(ctx_hash) = state.index.get(&state.active_context).copied() {
-            if let Some(mut ctx_node) = state.nodes.get(&ctx_hash).cloned() {
-                let mut mutated = false;
-                match &mut ctx_node {
-                    Node::Workbench { active_nodes, .. } => {
-                        active_nodes.insert(target_hash);
-                        mutated = true;
-                    }
-                    Node::Collection { items, .. } => {
-                        items.insert(target_hash);
-                        mutated = true;
-                    }
-                    _ => {}
-                }
-
-                if mutated {
-                    let new_ctx_hash = ctx_node.calculate_hash();
-                    state.nodes.insert(new_ctx_hash, ctx_node);
-                    state
-                        .index
-                        .insert(state.active_context.clone(), new_ctx_hash);
-                }
+    if state.active_context != "Global"
+        && let Some(ctx_hash) = state.index.get(&state.active_context).copied()
+        && let Some(mut ctx_node) = state.nodes.get(&ctx_hash).cloned()
+    {
+        let mut mutated = false;
+        match &mut ctx_node {
+            Node::Workbench { active_nodes, .. } => {
+                active_nodes.insert(target_hash);
+                mutated = true;
             }
+            Node::Collection { items, .. } => {
+                items.insert(target_hash);
+                mutated = true;
+            }
+            _ => {}
+        }
+
+        if mutated {
+            let new_ctx_hash = ctx_node.calculate_hash();
+            state.nodes.insert(new_ctx_hash, ctx_node);
+            state
+                .index
+                .insert(state.active_context.clone(), new_ctx_hash);
         }
     }
 }

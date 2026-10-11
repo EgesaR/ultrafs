@@ -91,10 +91,10 @@ impl UltraFSEngine {
             .find(|entry| *entry.1 == block_index)
             .map(|(hash, _)| *hash);
 
-        if let Some(hash) = block_hash {
-            if let Ok(Some(cached_data)) = self.ram_cache.get(&hash) {
-                return Ok(cached_data);
-            }
+        if let Some(hash) = block_hash
+            && let Ok(Some(cached_data)) = self.ram_cache.get(&hash)
+        {
+            return Ok(cached_data);
         }
 
         // 2. L2 Hardware / Disk Fallback

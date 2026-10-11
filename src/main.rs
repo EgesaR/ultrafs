@@ -1,291 +1,357 @@
-mod cache;
-mod cli;
-mod core;
-mod fastcdc;
-mod graph;
-mod hardware;
-
-use bincode::Options; // 1. IMPORT BINCODE OPTIONS
+use bincode::Options;
 use colored::*;
 use rustyline::error::ReadlineError;
 use rustyline::history::DefaultHistory;
-use rustyline::{Config, Editor}; // The powerful CLI controller
-use std::sync::Arc; // Notice Mutex is completely gone for lock-free scaling!
+use rustyline::{Config, Editor};
+use std::sync::Arc;
 use tokio::sync::mpsc;
+use ultrafs::{IoCommand, cli, core, graph, hardware};
 
 use crate::cli::execute_command;
-use crate::core::acm::AdaptiveConcurrencyManager;
-// 1. IMPORT THE ENGINE
-use core::UltraFSEngine;
-use graph::state::FsState;
-use hardware::allocator::BlockAllocator;
-use hardware::storage::{AlignedBlock, BLOCK_SIZE, UltraStorage};
-
+use crate::cli::ui::{Status, print_status};
 use crate::core::completion::CommandCompleter;
+use crate::core::runtime::UltraFsDaemon;
+use crate::graph::state::FsState;
+use crate::hardware::allocator::BlockAllocator;
+use crate::hardware::storage::{AlignedBlock, BLOCK_SIZE, UltraStorage};
 
-pub enum IoCommand {
-    WriteBlock { index: u64, block: AlignedBlock },
-    SyncCache,
-    Shutdown,
-    Sync, // Triggers an OS-level fsync
-}
+/// Load persisted filesystem metadata from the storage image.
+fn load_state(storage: &mut UltraStorage) -> FsState {
+    let mut state = FsState::new();
+    let mut superblock = AlignedBlock::new();
 
-#[tokio::main]
-async fn main() -> std::io::Result<()> {
-    println!(
-        "{}",
-        "--- UltraFS Engine Initializing (Tokio Virtual CPU Active) ---"
-            .cyan()
-            .bold()
+    let has_magic = storage.read_block(0, &mut superblock).is_ok()
+        && superblock.as_slice().get(..4) == Some(&b"UFS!"[..]);
+
+    if !has_magic {
+        storage
+            .format_superblock()
+            .expect("Failed to format UltraFS superblock");
+
+        print_status(
+            Status::Success,
+            "Superblock formatted. Storage initialized.",
+        );
+
+        return state;
+    }
+
+    let header = match superblock.as_slice().get(4..12) {
+        Some(header) => header,
+        None => {
+            print_status(
+                Status::Error,
+                "Invalid superblock header. Starting with fresh state.",
+            );
+            return state;
+        }
+    };
+
+    let payload_len = u32::from_le_bytes(header[0..4].try_into().unwrap()) as usize;
+
+    let block_count = u32::from_le_bytes(header[4..8].try_into().unwrap()) as usize;
+
+    // Must match the limit used by cmd_io::handle_exit().
+    const MAX_SAFE_PAYLOAD: usize = 10 * 1024 * 1024;
+    let max_safe_blocks = MAX_SAFE_PAYLOAD.div_ceil(BLOCK_SIZE);
+
+    if payload_len > MAX_SAFE_PAYLOAD || block_count > max_safe_blocks {
+        print_status(
+            Status::Error,
+            &format!(
+                "Invalid superblock bounds: payload={} bytes, blocks={}.",
+                payload_len, block_count
+            ),
+        );
+        return state;
+    }
+
+    if block_count == 0 {
+        if payload_len == 0 {
+            print_status(
+                Status::System,
+                "Clean superblock detected. Starting with a fresh DAG.",
+            );
+        } else {
+            print_status(
+                Status::Error,
+                "Invalid superblock: nonzero payload with zero data blocks.",
+            );
+        }
+
+        return state;
+    }
+
+    let available_bytes = match block_count.checked_mul(BLOCK_SIZE) {
+        Some(bytes) if payload_len <= bytes => bytes,
+        _ => {
+            print_status(
+                Status::Error,
+                "Invalid superblock: payload exceeds available storage blocks.",
+            );
+            return state;
+        }
+    };
+
+    print_status(
+        Status::System,
+        &format!(
+            "Reconstructing persistent DAG from {} blocks...",
+            block_count
+        ),
     );
 
-    let target_drive = "virtual_flash.img";
-    let mut storage = UltraStorage::open(target_drive).expect("Failed to lock disk");
-    let mut state = FsState::new();
+    let mut payload = Vec::with_capacity(available_bytes);
 
-    // --- BOOT SEQUENCE ---
-    let mut boot_block = AlignedBlock::new();
+    // Block 0 is reserved for the superblock. Data begins at block 1.
+    for index in 1..=block_count {
+        let mut block = AlignedBlock::new();
 
-    // Verify Magic Structure
-    if storage.read_block(0, &mut boot_block).is_ok() && &boot_block.as_slice()[0..4] == b"UFS!" {
-        // Extract offsets
-        let payload_len =
-            u32::from_le_bytes(boot_block.as_slice()[4..8].try_into().unwrap()) as usize;
-        let block_count =
-            u32::from_le_bytes(boot_block.as_slice()[8..12].try_into().unwrap()) as usize;
-
-        // Cap sanity checks: Payload shouldn't exceed reasonable limits (e.g., 128MB)
-        // and block count shouldn't exceed expected bounds.
-        let max_safe_payload = 128 * 1024 * 1024;
-        let max_safe_blocks = max_safe_payload / BLOCK_SIZE;
-
-        if payload_len > max_safe_payload || block_count > max_safe_blocks {
-            println!(
-                "{}",
-                format!("[WARN] Superblock corruption detected (Payload: {} bytes). Forcing fresh state.", payload_len).yellow()
+        if let Err(error) = storage.read_block(index as u64, &mut block) {
+            print_status(
+                Status::Error,
+                &format!("Recovery failed while reading block {}: {}", index, error),
             );
-        } else if block_count > 0 {
-            println!(
-                "{}",
-                format!(
-                    "[INFO] Superblock mapped. Reconstructing DAG across {} blocks...",
-                    block_count
-                )
+            return state;
+        }
+
+        payload.extend_from_slice(block.as_slice());
+    }
+
+    if payload.len() < payload_len {
+        print_status(
+            Status::Error,
+            "Recovery payload is incomplete. Starting with fresh state.",
+        );
+        return state;
+    }
+
+    let decoder = bincode::DefaultOptions::new().with_limit(MAX_SAFE_PAYLOAD as u64);
+
+    match decoder.deserialize::<FsState>(&payload[..payload_len]) {
+        Ok(restored_state) => {
+            state = restored_state;
+
+            print_status(
+                Status::Success,
+                &format!(
+                    "Persistent DAG restored successfully ({} bytes).",
+                    payload_len
+                ),
+            );
+        }
+
+        Err(error) => {
+            print_status(
+                Status::Error,
+                &format!(
+                    "Could not deserialize filesystem state: {}. Starting fresh.",
+                    error
+                ),
+            );
+        }
+    }
+
+    state
+}
+
+fn main() {
+    // Use the runtime and ACM created by the daemon.
+    let daemon = UltraFsDaemon::boot();
+
+    daemon.runtime.block_on(async {
+        print_status(
+            Status::System,
+            "UltraFS Initializing (Tokio Runtime + ACM Active)",
+        );
+
+        // Open persistent storage before launching the actor.
+        let target_drive = "virtual_flash.img";
+
+        let mut storage = UltraStorage::open(target_drive).expect("Failed to open UltraFS storage");
+
+        let mut state = load_state(&mut storage);
+
+        // Initialize physical-sector allocation.
+        let allocator = Arc::new(BlockAllocator::new(2_097_152));
+
+        // A single channel is shared by the engine and command handlers.
+        let (tx, rx) = mpsc::channel::<IoCommand>(1024);
+
+        // Use the existing engine constructor and shared allocator.
+        let mut engine = crate::core::engine::UltraFSEngine::new(
+            16 * 1024 * 1024,
+            Arc::clone(&allocator),
+            tx.clone(),
+        );
+
+        print_status(Status::System, "Adaptive Concurrency Manager connected.");
+
+        // The actor owns UltraStorage and processes commands sequentially.
+        let io_task = tokio::spawn(async move {
+            let mut storage = storage;
+            let mut rx = rx;
+
+            while let Some(command) = rx.recv().await {
+                match command {
+                    IoCommand::WriteBlock { index, block } => {
+                        match storage.write_block(index, &block) {
+                            Ok(()) => {
+                                println!(
+                                    "{}",
+                                    format!("[IO-ACTOR] Wrote storage block {}.", index).green()
+                                );
+                            }
+
+                            Err(error) => {
+                                eprintln!(
+                                    "{}",
+                                    format!(
+                                        "[IO-ACTOR] Failed to write block {}: {}",
+                                        index, error
+                                    )
+                                    .red()
+                                );
+                            }
+                        }
+                    }
+
+                    IoCommand::SyncCache | IoCommand::Sync => {
+                        // TODO: Call the actual flush/fsync method exposed
+                        // by UltraStorage. This message alone is not a flush.
+                        eprintln!(
+                            "{}",
+                            "[IO-ACTOR] Sync requested, but the physical flush API is not wired in."
+                                .yellow()
+                        );
+                    }
+
+                    IoCommand::Shutdown => {
+                        print_status(Status::System, "Storage I/O actor shutting down.");
+                        break;
+                    }
+                }
+            }
+
+            // UltraStorage is dropped when the actor exits.
+        });
+
+        // Configure the interactive shell and persistent history.
+        let config = Config::builder().auto_add_history(true).build();
+
+        let mut rl: Editor<CommandCompleter, DefaultHistory> =
+            Editor::with_config(config).expect("Failed to initialize Rustyline");
+
+        if let Err(error) = rl.load_history("ufs_history.txt") {
+            println!("{}", format!("[INFO] History not loaded: {}", error).cyan());
+        }
+
+        rl.set_helper(Some(CommandCompleter::new()));
+
+        println!(
+            "\n{}",
+            "=======================================================".bright_blue()
+        );
+        println!(
+            " {} {}",
+            "UltraFS Interactive Command Interface".bold(),
+            "Online".green()
+        );
+        println!(
+            " Type {} to see available commands.",
+            "help".magenta().bold()
+        );
+        println!(
+            "{}\n",
+            "=======================================================".bright_blue()
+        );
+
+        // True when execute_command() already handled the exit command.
+        let mut exit_command_handled = false;
+
+        loop {
+            let prompt = format!("ufs [{}]> ", state.active_context)
                 .cyan()
-            );
+                .bold()
+                .to_string();
 
-            // Safe to allocate because we validated the bounds
-            let mut payload = Vec::with_capacity(block_count * BLOCK_SIZE);
-            let mut read_success = true;
+            match rl.readline(&prompt) {
+                Ok(line) => {
+                    if line.trim().is_empty() {
+                        continue;
+                    }
 
-            // Traverse sectors to reconstruct payload
-            for i in 1..=block_count {
-                let mut chunk = AlignedBlock::new();
-                if storage.read_block(i as u64, &mut chunk).is_ok() {
-                    payload.extend_from_slice(chunk.as_slice());
-                } else {
-                    read_success = false;
+                    let command = line.split_whitespace().next().unwrap_or("");
+
+                    // All commands go through the central dispatcher.
+                    let should_continue = execute_command(
+                        &line,
+                        &mut state,
+                        &tx,
+                        &allocator,
+                        &mut engine,
+                        &daemon.acm,
+                    )
+                    .await;
+
+                    if !should_continue {
+                        exit_command_handled = command == "exit";
+                        break;
+                    }
+                }
+
+                Err(ReadlineError::Interrupted) => {
+                    print_status(Status::System, "Interrupt received. Starting shutdown.");
+                    break;
+                }
+
+                Err(ReadlineError::Eof) => {
+                    print_status(Status::System, "End of input received. Starting shutdown.");
+                    break;
+                }
+
+                Err(error) => {
+                    print_status(Status::Error, &format!("REPL error: {}", error));
                     break;
                 }
             }
+        }
 
-            if read_success && payload.len() >= payload_len {
-                // Prevent out-of-bounds slice panics if payload_len is corrupted
-                let safe_len = payload_len.min(payload.len());
-
-                // 2. BOUNDED DESERIALIZATION
-                let decoder = bincode::DefaultOptions::new().with_limit(10 * 1024 * 1024); // Limit bincode allocation to 10MB
-
-                // Deserialize safely using the bound limit
-                match decoder.deserialize::<FsState>(&payload[..safe_len]) {
-                    Ok(loaded_state) => {
-                        state = loaded_state;
-                        println!(
-                            "{}",
-                            format!(
-                                "[SUCCESS] Persistent DAG State ({} bytes) fully restored!",
-                                payload_len
-                            )
-                            .green()
-                            .bold()
-                        );
-                    }
-                    Err(e) => {
-                        println!(
-                            "{}",
-                            format!(
-                                "[WARN] Failed to deserialize DAG payload: {}. Starting fresh.",
-                                e
-                            )
-                            .yellow()
-                        );
-                    }
-                }
-            } else {
-                println!(
-                    "{}",
-                    "[WARN] Failed to read all DAG blocks or payload truncated. Starting fresh."
-                        .yellow()
-                );
-            }
-        } else {
-            println!(
-                "{}",
-                "[INFO] Clean Superblock detected. Starting fresh DAG.".cyan()
+        if let Err(error) = rl.save_history("ufs_history.txt") {
+            print_status(
+                Status::Error,
+                &format!("Could not save command history: {}", error),
             );
         }
-    } else {
-        // If there is no magic signature, format the drive
-        storage
-            .format_superblock()
-            .expect("Failed to format Superblock");
-        println!("[SUCCESS] Superblock formatted. Storage locked via O_DIRECT.");
-    }
 
-    // Initialize the block allocator.
-    let global_allocator = Arc::new(BlockAllocator::new(2_097_152));
+        // The "exit" command already invoked handle_exit() via execute_command.
+        // EOF and Ctrl+C still need to trigger persistence.
+        if !exit_command_handled {
+            let _ = cli::cmd_io::handle_exit(&state, &tx).await;
+        }
 
-    // Initialize the shared adaptive concurrency manager.
-    let cpu_cores = std::thread::available_parallelism()
-        .map(usize::from)
-        .unwrap_or(1);
+        // Queue shutdown after persistence writes on the same sender.
+        if tx.send(IoCommand::SyncCache).await.is_err() {
+            print_status(
+                Status::Error,
+                "Could not queue the synchronization command.",
+            );
+        }
 
-    let concurrency = AdaptiveConcurrencyManager::new(cpu_cores);
+        if tx.send(IoCommand::Shutdown).await.is_err() {
+            print_status(Status::Error, "Could not queue I/O actor shutdown.");
+        }
 
-    // Initialize the I/O actor channel.
-    let (tx, rx) = mpsc::channel::<IoCommand>(1024);
+        drop(tx);
 
-    println!(
-        "{}",
-        format!(
-            "[ACM] Adaptive concurrency initialized: {} CPU permits, {} I/O permits",
-            cpu_cores,
-            cpu_cores * 4
-        )
-        .cyan()
-    );
+        match io_task.await {
+            Ok(()) => {
+                print_status(Status::Success, "UltraFS I/O actor stopped.");
+            }
 
-    // 2. INITIALIZE THE DEDUPLICATION ENGINE (16MB cache boundary)
-    let mut engine = UltraFSEngine::new(16 * 1024 * 1024, global_allocator.clone(), tx.clone());
-
-    let io_task = tokio::spawn(async move {
-        let mut rx = rx;
-
-        while let Some(command) = rx.recv().await {
-            match command {
-                IoCommand::WriteBlock { index, block } => {
-                    if let Err(e) = storage.write_block(index, &block) {
-                        eprintln!(
-                            "{}",
-                            format!("[IO-ACTOR] FATAL ERROR on Block {}: {}", index, e).red()
-                        );
-                    } else {
-                        if index != 0 {
-                            println!(
-                                "{}",
-                                format!("  -> [IO-ACTOR] Flushed 4KB to Hardware Block {}", index)
-                                    .green()
-                            );
-                        }
-                    }
-                }
-                // Handle both Sync and SyncCache identically
-                IoCommand::SyncCache | IoCommand::Sync => println!(
-                    "{}",
-                    "  -> [IO-ACTOR] Hardware cache synchronized.".yellow()
-                ),
-                IoCommand::Shutdown => break,
+            Err(error) => {
+                print_status(Status::Error, &format!("I/O actor failed: {}", error));
             }
         }
     });
-
-    println!(
-        "\n{}",
-        "=======================================================".bright_blue()
-    );
-    println!(
-        " {} {}",
-        "UltraFS Interactive Command Interface".bold(),
-        "Online".green()
-    );
-    println!(
-        "{}",
-        "=======================================================".bright_blue()
-    );
-    println!(
-        " Type {} to see available commands.",
-        "help".magenta().bold()
-    );
-    println!(
-        "{}\n",
-        "=======================================================".bright_blue()
-    );
-
-    // --- RUSTYLINE REPL LOOP ---
-    let config = Config::builder().auto_add_history(true).build();
-
-    let mut rl: Editor<CommandCompleter, DefaultHistory> =
-        Editor::with_config(config).expect("Failed to initialize Rustyline");
-    let _ = rl.load_history("ufs_history.txt");
-
-    // Attach the Completer
-    let completer = CommandCompleter::new();
-    rl.set_helper(Some(completer));
-
-    loop {
-        let prompt = format!("ufs [{}]> ", state.active_context)
-            .cyan()
-            .bold()
-            .to_string();
-
-        match rl.readline(&prompt) {
-            Ok(line) => {
-                if line.trim().is_empty() {
-                    continue;
-                }
-
-                // Save command to up/down history
-                rl.add_history_entry(line.as_str()).unwrap();
-
-                // 3. PASS THE ENGINE TO YOUR COMMAND EXECUTOR
-                let should_continue = execute_command(
-                    &line,
-                    &mut state,
-                    &tx,
-                    &global_allocator,
-                    &mut engine,
-                    &concurrency,
-                )
-                .await;
-
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-                if !should_continue {
-                    break;
-                }
-            }
-            Err(ReadlineError::Interrupted) | Err(ReadlineError::Eof) => {
-                println!(
-                    "{}",
-                    "[SYS] Keyboard Interrupt detected. Use 'exit' to save state safely.".yellow()
-                );
-            }
-            Err(err) => {
-                println!("Error: {:?}", err);
-                break;
-            }
-        }
-    }
-
-    let _ = rl.save_history("ufs_history.txt");
-
-    println!("{}", "[SYS] Initiating safe shutdown sequence...".yellow());
-    tx.send(IoCommand::SyncCache).await.unwrap();
-    tx.send(IoCommand::Shutdown).await.unwrap();
-
-    drop(tx);
-    io_task.await.unwrap();
-
-    println!("{}", "[SUCCESS] Engine offline.".green().bold());
-    Ok(())
 }

@@ -1,121 +1,117 @@
-use crate::cli::ui::{Status, print_status};
+use crate::cli::ui::{Status, print_status, print_tree};
 use crate::core::engine::UltraFSEngine;
+use crate::graph::metadata::Node;
 use crate::graph::state::FsState;
 use crate::hardware::allocator::BlockAllocator;
+
 use colored::*;
 use std::io::Write;
 use std::sync::Arc;
 
+// -----------------------------------------------------------------------------
+// HELP
+// -----------------------------------------------------------------------------
+
 pub fn handle_help() {
     println!("{}", "\n UltraFS System Commands:".yellow().bold());
+
     println!(
-        "  {} <type> <name>          : {}",
-        "spawn".cyan(),
-        "Types: workbench, collection"
+        "  {} <type> <name>          : Create a workbench or collection",
+        "spawn".cyan()
     );
     println!(
-        "  {} <name>                 : {}",
-        "focus".cyan(),
-        "Shift view to a Workbench/Collection"
+        "  {} <name>                 : Focus a workbench or collection",
+        "focus".cyan()
     );
     println!(
-        "  {} <target> <collection>  : {}",
-        "link ".cyan(),
-        "Connect a node to a collection"
+        "  {} <target> <collection>  : Link a node to a collection",
+        "link".cyan()
     );
     println!(
-        "  {} <type> <name> [data]   : {}",
-        "write".cyan(),
-        "Writes data & runs Entropy Router"
+        "  {} [type] <name> [data]   : Write a physical data block",
+        "write".cyan()
     );
     println!(
-        "  {} <name> <content>       : {}",
-        "ingest".cyan(),
-        "FastCDC chunking into Merkle DAG"
+        "  {} <name> <content>       : Ingest content using FastCDC",
+        "ingest".cyan()
     );
     println!(
-        "  {} <name>                  : {}",
-        "read / cat".cyan(),
-        "Hydrate file from physical sectors"
+        "  {} <name>                 : Read a file",
+        "read / cat".cyan()
     );
     println!(
-        "  {} <name>                    : {}",
-        "rm / delete".cyan(),
-        "Reference-counted GC node deletion"
+        "  {} <name>                 : Remove a file",
+        "rm / delete".cyan()
     );
     println!(
-        "  {}                         : {}",
-        "checkpoint / snap".cyan(),
-        "Instant Zero-Copy state snapshot"
+        "  {}                         : Create a checkpoint",
+        "checkpoint / snap".cyan()
     );
     println!(
-        "  {}                          : {}",
-        "rollback / undo".cyan(),
-        "Revert DAG state & sync allocation"
+        "  {}                         : Roll back to a checkpoint",
+        "rollback / undo".cyan()
     );
     println!(
-        "  {}                        : {}",
-        "monitor".cyan(),
-        "Launch Continuous System Telemetry"
+        "  {}                         : Show system telemetry",
+        "monitor".cyan()
     );
     println!(
-        "  {} <dev>               : {}",
-        "diskinfo".cyan(),
-        "Inspect physical block device metadata"
+        "  {} <dev>                  : Inspect a storage device",
+        "diskinfo".cyan()
     );
     println!(
-        "  {}                        : {}",
-        "info / stats".cyan(),
-        "View system state and cache metrics"
+        "  {}                         : Show filesystem metrics",
+        "info / stats".cyan()
+    );
+    println!("  {}                         : List nodes", "list".cyan());
+    println!(
+        "  {}                         : Visualize the DAG",
+        "graph".cyan()
     );
     println!(
-        "  {}                        : {}",
-        "list".cyan(),
-        "Flat view of nodes in current context"
+        "  {}                         : Clear the terminal",
+        "clear".cyan()
     );
     println!(
-        "  {}                        : {}",
-        "graph".cyan(),
-        "Visualize DAG tree relationships"
+        "  {}                         : Verify node hashes and sector references",
+        "verify".cyan()
     );
     println!(
-        "  {}                        : {}",
-        "clear".cyan(),
-        "Clear the terminal screen"
+        "  {}                         : Attempt automatic recovery",
+        "recover".cyan()
     );
     println!(
-        "  {}                        : {}\n",
-        "exit".cyan(),
-        "Save DAG to hardware and shutdown"
+        "  {}                         : Persist the state and shut down\n",
+        "exit".cyan()
     );
 }
 
+// -----------------------------------------------------------------------------
+// MONITOR
+// -----------------------------------------------------------------------------
+
 pub async fn handle_monitor(state: &FsState) {
-    println!(
-        "{}",
-        "\n📡 INITIALIZING ULTRAFS CONTINUOUS TELEMETRY..."
-            .green()
-            .bold()
-    );
-    println!(
-        "{}",
-        "Press Ctrl+C to interrupt (wait 3 seconds for demo to finish)".dimmed()
-    );
+    println!("{}", "\nULTRAFS CONTINUOUS TELEMETRY".green().bold());
+    println!("{}", "Press Ctrl+C to stop telemetry.".dimmed());
 
     for i in 1..=3 {
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-        let active_nodes = state.nodes.len();
+
         println!(
-            "  [T+{}s] CPU Load: {}% | Active Nodes: {} | Hardware Blocks Free: {} | Sub-System Latency: {}ns",
+            "[T+{}s] Sample CPU Load: {}% | Active Nodes: {} | Estimated Subsystem Latency: {} ns",
             i,
             (i * 12) % 100,
-            active_nodes.to_string().cyan(),
-            "2,097,140".yellow(),
-            (240 - (i * 10)).to_string().green()
+            state.nodes.len().to_string().cyan(),
+            240 - (i * 10)
         );
     }
-    println!("{}", "Telemetry pause.\n".dimmed());
+
+    println!("{}", "Telemetry paused.\n".dimmed());
 }
+
+// -----------------------------------------------------------------------------
+// INFO AND STATS
+// -----------------------------------------------------------------------------
 
 pub fn handle_info(state: &FsState) {
     println!("\n{}", "--- UltraFS Metrics ---".magenta().bold());
@@ -131,35 +127,121 @@ pub fn handle_info(state: &FsState) {
 
 pub fn handle_stats(engine: &UltraFSEngine) {
     let (bytes_used, cached_chunks) = engine.cache_stats();
+
     println!("{}", "=== RAM Cache Statistics ===".bright_blue());
     println!("  Active Compressed Chunks : {}", cached_chunks);
     println!("  Memory Footprint         : {} bytes", bytes_used);
 }
 
+// -----------------------------------------------------------------------------
+// CLEAR
+// -----------------------------------------------------------------------------
+
 pub fn handle_clear() {
     print!("\x1B[2J\x1B[1;1H");
-    std::io::stdout().flush().unwrap();
+
+    if let Err(error) = std::io::stdout().flush() {
+        eprintln!("Could not flush terminal: {}", error);
+    }
 }
 
+// -----------------------------------------------------------------------------
+// RECOVERY
+// -----------------------------------------------------------------------------
+
 pub fn handle_auto_recover(state: &mut FsState, allocator: &Arc<BlockAllocator>) {
-    print_status(Status::System, "Initializing Intelligent Self-Healing...");
+    print_status(Status::System, "Initializing filesystem self-healing...");
 
     match state.intelligent_rollback() {
-        Ok(0) => print_status(
-            Status::Success,
-            "Current state is stable. No rollback required",
-        ),
+        Ok(0) => {
+            print_status(
+                Status::Success,
+                "Current state is stable. No rollback required.",
+            );
+        }
+
         Ok(rewinds) => {
             allocator.sync_from_refs(state.block_refs.keys().copied());
+
             print_status(
                 Status::Warning,
                 &format!("Reverted {} corrupted states.", rewinds),
             );
+
             print_status(
                 Status::Success,
-                "Status snapshot restored and hardware synced.",
+                "Filesystem state restored and allocator synchronized.",
             );
         }
-        Err(e) => print_status(Status::Error, e),
+
+        Err(error) => {
+            print_status(Status::Error, error);
+        }
+    }
+}
+
+// -----------------------------------------------------------------------------
+// INTEGRITY VERIFICATION
+// -----------------------------------------------------------------------------
+
+pub fn handle_verify(state: &FsState) {
+    print_status(Status::System, "ULTRAFS / INTEGRITY AUDIT");
+
+    let mut corrupted_nodes = 0_usize;
+    let mut dangling_blocks = 0_usize;
+
+    for (hash, node) in &state.nodes {
+        // Recalculate the node hash and compare it with the index key.
+        if node.calculate_hash() != *hash {
+            corrupted_nodes += 1;
+
+            let label = match node {
+                Node::File { name, .. } => name.as_str(),
+                _ => "<non-file node>",
+            };
+
+            print_tree(false, &format!("Checksum mismatch: {}", label));
+        }
+
+        // Only File nodes in the supplied model carry physical block lists.
+        if let Node::File { name, blocks, .. } = node {
+            for block_index in blocks {
+                if !state.block_refs.contains_key(block_index) {
+                    dangling_blocks += 1;
+
+                    print_tree(
+                        false,
+                        &format!(
+                            "Untracked physical sector: file '{}' -> block {}",
+                            name, block_index
+                        ),
+                    );
+                }
+            }
+        }
+    }
+
+    if corrupted_nodes == 0 && dangling_blocks == 0 {
+        print_tree(true, "Merkle DAG integrity verified");
+
+        print_status(
+            Status::Success,
+            "All checked node hashes and sector references are consistent.",
+        );
+    } else {
+        print_tree(
+            false,
+            &format!("{} corrupted nodes detected", corrupted_nodes),
+        );
+
+        print_tree(
+            true,
+            &format!("{} dangling sector pointers detected", dangling_blocks),
+        );
+
+        print_status(
+            Status::Error,
+            "Integrity issues detected. Run 'recover' to attempt self-healing.",
+        );
     }
 }

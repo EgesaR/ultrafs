@@ -28,7 +28,6 @@ impl AdaptiveConcurrencyManager {
 
     /// Acquires a permit for heavy SIMD, Merkle Hashing, or AI detokenization.
     /// Blocks if the system is at maximum CPU concurrency.
-
     pub async fn acquire_cpu(&self) -> tokio::sync::SemaphorePermit<'_> {
         self.cpu_pool
             .acquire()

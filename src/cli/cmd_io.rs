@@ -23,7 +23,7 @@ const DEFAULT_PERMISSIONS: &str = "rwx------";
 const MAX_SERIALIZED_STATE_SIZE: u64 = 10 * 1024 * 1024;
 
 // -----------------------------------------------------------------------------
-// Shared helpers
+// Helpers
 // -----------------------------------------------------------------------------
 
 fn hash_payload(bytes: &[u8]) -> [u8; 32] {
@@ -65,6 +65,7 @@ pub async fn handle_write(
     // Syntax:
     // write <type> <filename> <content>
     // write <filename> <content>
+
     let (data_type, name_idx) = match parts.get(1).copied() {
         Some(candidate) if KNOWN_TYPES.contains(&candidate) => (candidate, 2),
         _ => ("raw", 1),
@@ -85,8 +86,6 @@ pub async fn handle_write(
     let data_bytes = data.into_bytes();
     let logical_size = data_bytes.len() as u64;
 
-    // This handler allocates exactly one physical block. Do not silently
-    // truncate a larger payload while recording its full logical size.
     if data_bytes.len() > BLOCK_SIZE {
         print_status(
             Status::Error,
@@ -108,32 +107,29 @@ pub async fn handle_write(
     if entropy >= 3.0 {
         print_tree(true, "High variance detected; storing payload losslessly");
     } else {
-        // No tokenizer is invoked by this function. Keep the original bytes
-        // intact and do not incorrectly mark the file as AI-tokenized.
         print_tree(
             true,
-            "Low variance detected; semantic encoder unavailable, storing losslessly",
+            "Low variance detected; storing losslessly (semantic encoding unavailable)",
         );
     }
 
-    // Acquire a shared CPU permit before dispatching CPU work.
+    // This requires AdaptiveConcurrencyManager to expose acquire_cpu().
     let cpu_permit = concurrency.acquire_cpu().await;
     let task_allocator = Arc::clone(allocator);
 
     let worker = task::spawn_blocking(move || {
         let target_block_index = task_allocator
             .allocate()
-            .expect("CRITICAL: Disk allocation failed");
+            .expect("Physical sector allocation failed");
 
         let mut target_block = AlignedBlock::new();
         let codebook_block = AlignedBlock::new();
 
-        let len = data_bytes.len().min(BLOCK_SIZE);
-        target_block.as_mut_slice()[..len].copy_from_slice(&data_bytes[..len]);
+        target_block.as_mut_slice()[..data_bytes.len()].copy_from_slice(&data_bytes);
 
         let start = Instant::now();
 
-        // Both pointers reference valid blocks of BLOCK_SIZE bytes.
+        // Both blocks contain BLOCK_SIZE bytes.
         let distance = unsafe {
             compute_l1_norm_avx256(
                 target_block.as_slice().as_ptr(),
@@ -145,32 +141,30 @@ pub async fn handle_write(
         (target_block_index, distance, start.elapsed(), target_block)
     });
 
-    let (target_block_index, _distance, elapsed, target_block) = match worker.await {
+    let (block_index, _distance, elapsed, block) = match worker.await {
         Ok(result) => result,
         Err(error) => {
             drop(cpu_permit);
 
-            print_status(Status::Error, &format!("CPU worker failed: {error}"));
+            print_status(Status::Error, &format!("CPU worker failed: {}", error));
             return;
         }
     };
 
-    // CPU work has finished; do not hold the permit while updating metadata
-    // or waiting for the I/O actor.
     drop(cpu_permit);
 
     if let Err(error) = tx
         .send(IoCommand::WriteBlock {
-            index: target_block_index,
-            block: target_block,
+            index: block_index,
+            block,
         })
         .await
     {
-        allocator.free(target_block_index);
+        allocator.free(block_index);
 
         print_status(
             Status::Error,
-            &format!("Could not queue block write: {error:?}"),
+            &format!("Could not queue block write: {}", error),
         );
         return;
     }
@@ -179,7 +173,7 @@ pub async fn handle_write(
         name: filename.clone(),
         size: logical_size,
         hash: content_hash,
-        blocks: vec![target_block_index],
+        blocks: vec![block_index],
         latent_seed: Vec::new(),
         model_hash: [0_u8; 32],
         attributes: default_attributes(entropy),
@@ -191,19 +185,17 @@ pub async fn handle_write(
     state.index.insert(filename.clone(), file_hash);
 
     inject_into_context(state, file_hash);
-    increment_block_ref(state, target_block_index);
-
-    // Automatic checkpoint after all metadata is consistent
+    increment_block_ref(state, block_index);
     state.auto_checkpoint();
 
-    let type_icon = match data_type {
+    let type_label = match data_type {
         "media" => "MEDIA",
         "note" => "NOTE",
         "task" => "TASK",
         _ => "FILE",
     };
 
-    print_tree(false, &format!("Allocated sector: {}", target_block_index));
+    print_tree(false, &format!("Allocated sector: {}", block_index));
     print_tree(
         true,
         &format!("Stored {} bytes in {:?}", logical_size, elapsed),
@@ -211,7 +203,7 @@ pub async fn handle_write(
 
     print_status(
         Status::Success,
-        &format!("[{}] Synthesized '{}'", type_icon, filename),
+        &format!("[{}] Stored '{}'", type_label, filename),
     );
 }
 
@@ -248,48 +240,60 @@ pub async fn handle_ingest(
             let mut block_indices = Vec::with_capacity(total_chunks);
 
             for (idx, node) in dag_nodes.iter().enumerate() {
-                // Deduplicate chunks using the engine's hash-to-sector map.
-                let target_block_index =
-                    if let Some(existing_index) = engine.disk_registry.get(&node.hash).copied() {
-                        existing_index
+                let block_index =
+                    if let Some(existing) = engine.disk_registry.get(&node.hash).copied() {
+                        existing
                     } else {
-                        let new_index = allocator
-                            .allocate()
-                            .expect("CRITICAL: Disk allocation failed");
+                        let new_index = match allocator.allocate() {
+                            Some(index) => index,
+                            None => {
+                                print_status(Status::Error, "Physical sector allocation failed.");
+                                return;
+                            }
+                        };
 
-                        let mut target_block = AlignedBlock::new();
+                        let mut block = AlignedBlock::new();
 
-                        // A newly allocated sector must contain the actual
-                        // chunk bytes, not an all-zero block.
                         let cached_data = match engine.ram_cache.get(&node.hash) {
                             Ok(Some(data)) => data,
+
                             Ok(None) => {
                                 allocator.free(new_index);
 
                                 print_status(
                                     Status::Error,
-                                    &format!("Chunk {} is missing from the RAM cache", idx),
+                                    &format!("Chunk {} was not found in the RAM cache.", idx),
                                 );
                                 return;
                             }
+
                             Err(error) => {
                                 allocator.free(new_index);
 
                                 print_status(
                                     Status::Error,
-                                    &format!("Could not retrieve chunk {}: {error:?}", idx),
+                                    &format!("Could not retrieve chunk {}: {:?}", idx, error),
                                 );
                                 return;
                             }
                         };
 
-                        let len = cached_data.len().min(BLOCK_SIZE);
-                        target_block.as_mut_slice()[..len].copy_from_slice(&cached_data[..len]);
+                        if cached_data.len() > BLOCK_SIZE {
+                            allocator.free(new_index);
+
+                            print_status(
+                                Status::Error,
+                                &format!("Chunk {} exceeds the physical block size.", idx),
+                            );
+                            return;
+                        }
+
+                        block.as_mut_slice()[..cached_data.len()].copy_from_slice(&cached_data);
 
                         if let Err(error) = tx
                             .send(IoCommand::WriteBlock {
                                 index: new_index,
-                                block: target_block,
+                                block,
                             })
                             .await
                         {
@@ -297,7 +301,7 @@ pub async fn handle_ingest(
 
                             print_status(
                                 Status::Error,
-                                &format!("Could not queue chunk write: {error:?}"),
+                                &format!("Could not queue chunk write: {}", error),
                             );
                             return;
                         }
@@ -306,7 +310,7 @@ pub async fn handle_ingest(
                         new_index
                     };
 
-                block_indices.push(target_block_index);
+                block_indices.push(block_index);
 
                 let hash_string = node.hash.to_string();
                 let hash_prefix = &hash_string[..hash_string.len().min(8)];
@@ -315,7 +319,7 @@ pub async fn handle_ingest(
                     idx + 1 == total_chunks,
                     &format!(
                         "Chunk [{}]: Hash={}... | Size={} B | Sector={}",
-                        idx, hash_prefix, node.size, target_block_index
+                        idx, hash_prefix, node.size, block_index
                     ),
                 );
             }
@@ -323,12 +327,11 @@ pub async fn handle_ingest(
             let content_hash = hash_payload(bytes);
             let entropy = calculate_entropy(bytes);
 
-            let chunk_count = block_indices.len();
-
-            // Commit reference counts only after every chunk was processed
             for &block_index in &block_indices {
                 increment_block_ref(state, block_index);
             }
+
+            let chunk_count = block_indices.len();
 
             let file_node = Node::File {
                 name: filename.clone(),
@@ -344,9 +347,8 @@ pub async fn handle_ingest(
 
             state.nodes.insert(file_hash, file_node);
             state.index.insert(filename.clone(), file_hash);
-            inject_into_context(state, file_hash);
 
-            // Automatically checkpoint the completed ingestion
+            inject_into_context(state, file_hash);
             state.auto_checkpoint();
 
             print_status(
@@ -357,8 +359,9 @@ pub async fn handle_ingest(
                 ),
             );
         }
+
         Err(error) => {
-            print_status(Status::Error, &format!("Ingestion failed: {error:?}"));
+            print_status(Status::Error, &format!("Ingestion failed: {:?}", error));
         }
     }
 }
@@ -375,7 +378,7 @@ pub fn handle_read(state: &FsState, engine: &mut UltraFSEngine, parts: &[&str]) 
         return;
     }
 
-    let Some(hash) = state.index.get(&filename.to_owned()) else {
+    let Some(hash) = state.index.get(filename) else {
         print_status(Status::Error, &format!("File '{}' not found", filename));
         return;
     };
@@ -384,52 +387,106 @@ pub fn handle_read(state: &FsState, engine: &mut UltraFSEngine, parts: &[&str]) 
         size,
         blocks,
         attributes,
+        latent_seed,
+        model_hash,
         ..
     }) = state.nodes.get(hash)
     else {
-        print_status(Status::Error, &format!("'{}' is not a file", filename));
+        print_status(
+            Status::Error,
+            &format!("'{}' is not a file or its metadata is missing", filename),
+        );
         return;
     };
 
-    print_status(
-        Status::System,
-        &format!("Reading '{}' ({} bytes)", filename, size),
-    );
-
     if attributes.is_latent_quark {
-        print_status(
-            Status::Warning,
-            "This file is marked as latent and requires a compatible detokenizer",
+        print_status(Status::System, "ULTRAFS / AI INFERENCE");
+        print_tree(
+            false,
+            "Payload is a Latent Quark. Initializing generative reconstruction...",
         );
+
+        let engine_result = crate::ai::LatentEngine::new()
+            .map_err(|e| e.to_string())
+            .and_then(|latent_engine| {
+                latent_engine
+                    .detokenize(latent_seed, model_hash)
+                    .map_err(|e| e.to_string())
+            });
+
+        match engine_result {
+            Ok(reconstructed_bytes) => {
+                print_tree(
+                    true,
+                    &format!(
+                        "Generated {} bytes via local Candle model",
+                        reconstructed_bytes.len()
+                    ),
+                );
+                println!("{}", String::from_utf8_lossy(&reconstructed_bytes));
+                print_status(Status::Success, "Latent reconstruction completed");
+            }
+            _ => {
+                print_status(
+                    Status::Error,
+                    "Latent model failed to detokenize the payload stream.",
+                );
+            }
+        }
         return;
     }
 
-    let mut payload = Vec::with_capacity(*size as usize);
+    let capacity = match usize::try_from(*size) {
+        Ok(value) => value,
+        Err(_) => {
+            print_status(
+                Status::Error,
+                "File size cannot be represented on this platform.",
+            );
+            return;
+        }
+    };
+
+    let mut payload = Vec::with_capacity(capacity);
 
     for &block_index in blocks {
         match engine.fetch_block(block_index) {
             Ok(data) => payload.extend_from_slice(&data),
+
             Err(error) => {
                 print_status(
                     Status::Error,
-                    &format!("Read fault at sector {}: {}", block_index, error),
+                    &format!("Read fault at sector {}: {:?}", block_index, error),
                 );
                 return;
             }
         }
     }
 
-    payload.truncate(*size as usize);
+    if payload.len() < capacity {
+        print_status(
+            Status::Error,
+            &format!(
+                "Incomplete file: expected {} bytes but retrieved {}.",
+                capacity,
+                payload.len()
+            ),
+        );
+        return;
+    }
+
+    payload.truncate(capacity);
 
     match String::from_utf8(payload) {
         Ok(text) => {
-            println!("{text}");
+            println!("{}", text);
             print_status(Status::Success, "Read completed");
         }
+
         Err(_) => {
             print_status(
                 Status::Warning,
-                "Binary data detected; refusing to render it as UTF-8 text",
+                "Binary data detected; refusing to render as UTF-8 text.",
             );
         }
     }
@@ -442,25 +499,17 @@ pub fn handle_read(state: &FsState, engine: &mut UltraFSEngine, parts: &[&str]) 
 pub fn handle_remove(state: &mut FsState, allocator: &Arc<BlockAllocator>, parts: &[&str]) {
     let filename = parts.get(1).copied().unwrap_or("");
 
-    // ---------------------------------------------------------------------
-    // 1. Validate the command
-    // ---------------------------------------------------------------------
     if filename.is_empty() {
         print_status(Status::Error, "Usage: rm <filename>");
         return;
     }
 
-    let filename_key = filename.to_owned();
-
-    // Look up the filename without modifying the index.
-    let Some(&hash) = state.index.get(&filename_key) else {
+    let Some(&hash) = state.index.get(filename) else {
         print_status(Status::Error, &format!("File '{}' not found", filename));
         return;
     };
 
-    // ---------------------------------------------------------------------
-    // 2. Validate the node before committing any changes
-    // ---------------------------------------------------------------------
+    // Validate the node before changing the index or node map.
     let blocks = match state.nodes.get(&hash) {
         Some(Node::File { blocks, .. }) => blocks.clone(),
 
@@ -470,95 +519,104 @@ pub fn handle_remove(state: &mut FsState, allocator: &Arc<BlockAllocator>, parts
         }
 
         None => {
-            print_status(
-                Status::Error,
-                &format!(
-                    "Filesystem metadata inconsistency: '{}' has no corresponding node",
-                    filename
-                ),
-            );
+            print_status(Status::Error, "Filesystem index references a missing node.");
             return;
         }
     };
 
-    // ---------------------------------------------------------------------
-    // 3. Commit the metadata removal
-    // ---------------------------------------------------------------------
-    state.index.remove(&filename_key);
+    state.index.remove(filename);
     state.nodes.remove(&hash);
 
     let mut freed_sectors = 0_usize;
     let mut retained_sectors = 0_usize;
+    let mut inconsistent_sectors = 0_usize;
 
-    // ---------------------------------------------------------------------
-    // 4. Update sector references and preserve snapshot data
-    // ---------------------------------------------------------------------
     for block_index in blocks {
-        let count = state.block_refs.get(&block_index).copied().unwrap_or(1);
+        match state.block_refs.get(&block_index).copied() {
+            Some(count) if count > 1 => {
+                state.block_refs.insert(block_index, count - 1);
+                retained_sectors += 1;
+            }
 
-        // A snapshot may still depend on this physical sector.
-        let held_by_snapshot = state
-            .snapshots
-            .iter()
-            .any(|snapshot| snapshot.3.get(&block_index).copied().unwrap_or(0) > 0);
+            Some(1) => {
+                state.block_refs.remove(&block_index);
+                allocator.free(block_index);
+                freed_sectors += 1;
+            }
 
-        if count <= 1 && !held_by_snapshot {
-            // No remaining file references or snapshot references.
-            state.block_refs.remove(&block_index);
-            allocator.free(block_index);
-
-            freed_sectors += 1;
-        } else {
-            // Retain the sector while other files or snapshots need it.
-            state
-                .block_refs
-                .insert(block_index, count.saturating_sub(1));
-
-            retained_sectors += 1;
+            Some(_) | None => {
+                // Do not free a sector with inconsistent reference metadata.
+                inconsistent_sectors += 1;
+            }
         }
     }
 
-    // ---------------------------------------------------------------------
-    // 5. Automatically checkpoint the completed mutation
-    // ---------------------------------------------------------------------
     state.auto_checkpoint();
 
-    // ---------------------------------------------------------------------
-    // 6. Report success
-    // ---------------------------------------------------------------------
     print_status(
-        Status::Success,
-        &format!(
-            "Removed '{}': freed {} sectors; retained {} shared/snapshot sectors",
-            filename, freed_sectors, retained_sectors
-        ),
+        Status::System,
+        &format!("ULTRAFS / STORAGE — removed '{}'", filename),
     );
+
+    print_tree(false, &format!("Freed {} physical sectors", freed_sectors));
+    print_tree(
+        true,
+        &format!("Retained {} shared sectors", retained_sectors),
+    );
+
+    if inconsistent_sectors > 0 {
+        print_status(
+            Status::Warning,
+            &format!(
+                "{} sectors had missing or invalid reference counts; they were not freed.",
+                inconsistent_sectors
+            ),
+        );
+    }
+
+    print_status(Status::Success, "Node removed and state checkpointed.");
 }
 
 // -----------------------------------------------------------------------------
 // EXIT / PERSISTENCE
 // -----------------------------------------------------------------------------
 
+/// Queue a serialized filesystem snapshot and its superblock.
+/// Returns false so execute_command() stops the REPL.
 pub async fn handle_exit(state: &FsState, tx: &mpsc::Sender<IoCommand>) -> bool {
-    print_status(Status::System, "Persisting UltraFS state");
+    print_status(Status::System, "Persisting UltraFS state...");
 
     let encoder = bincode::DefaultOptions::new().with_limit(MAX_SERIALIZED_STATE_SIZE);
 
     let encoded = match encoder.serialize(state) {
         Ok(data) => data,
+
         Err(error) => {
             print_status(
                 Status::Error,
-                &format!("State serialization failed: {error}"),
+                &format!("State serialization failed: {}", error),
             );
             return false;
         }
     };
 
-    let total_bytes = encoded.len();
-    let blocks_needed = (total_bytes + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    if encoded.len() > u32::MAX as usize {
+        print_status(
+            Status::Error,
+            "Serialized state exceeds the superblock format's size limit.",
+        );
+        return false;
+    }
 
-    // Write payload blocks before publishing the superblock.
+    let total_bytes = encoded.len();
+    let blocks_needed = total_bytes.div_ceil(BLOCK_SIZE);
+
+    if blocks_needed > u32::MAX as usize {
+        print_status(Status::Error, "Too many blocks for the superblock format.");
+        return false;
+    }
+
+    // Queue every payload block before publishing the superblock.
     for (idx, chunk) in encoded.chunks(BLOCK_SIZE).enumerate() {
         let mut block = AlignedBlock::new();
         block.as_mut_slice()[..chunk.len()].copy_from_slice(chunk);
@@ -572,12 +630,16 @@ pub async fn handle_exit(state: &FsState, tx: &mpsc::Sender<IoCommand>) -> bool 
         {
             print_status(
                 Status::Error,
-                &format!("Could not queue state block {}: {error:?}", idx + 1),
+                &format!("Could not queue state block {}: {}", idx + 1, error),
             );
             return false;
         }
     }
 
+    // Superblock layout:
+    // [0..4]   magic
+    // [4..8]   serialized payload length
+    // [8..12]  number of payload blocks
     let mut superblock = AlignedBlock::new();
 
     superblock.as_mut_slice()[0..4].copy_from_slice(b"UFS!");
@@ -598,21 +660,20 @@ pub async fn handle_exit(state: &FsState, tx: &mpsc::Sender<IoCommand>) -> bool 
     {
         print_status(
             Status::Error,
-            &format!("Could not queue the superblock: {error:?}"),
+            &format!("Could not queue superblock: {}", error),
         );
         return false;
     }
 
     print_tree(
-        false,
+        true,
         &format!(
-            "Serialized {} bytes across {} blocks",
+            "Queued {} serialized bytes across {} blocks",
             total_bytes, blocks_needed
         ),
     );
 
-    print_status(Status::Success, "State persistence requests queued");
+    print_status(Status::Success, "Filesystem persistence writes queued.");
 
-    // Preserve the original REPL contract: false requests termination.
     false
 }

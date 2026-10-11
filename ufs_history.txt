@@ -1,10 +1,4 @@
 #V2
-focus Mama_Coffee
-ls
-list
-graph
-write task buy_coffee Bring milk
-list
 help
 exit
 list
@@ -98,4 +92,10 @@ write raw low_entropy.bin AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
 read low_entropy.bin
 write raw high_entropy.bin f9a81c3b7e4d0281aef98421c900e21a48c61
 read high_entropy.bin
+exit
+write note system_architecture UltraFS is fully operational with AVX-256 and ACM.
+ingest large_doc High-performance immutable block streams with FastCDC chunking and BLAKE3 hashing.
+read system_architecture
+verify
+stats
 exit

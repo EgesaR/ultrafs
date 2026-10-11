@@ -16,6 +16,9 @@ use crate::core::engine::UltraFSEngine;
 use crate::graph::state::FsState;
 use crate::hardware::allocator::BlockAllocator;
 
+/// Execute one command.
+///
+/// Returns true to continue the REPL and false to exit.
 pub async fn execute_command(
     line: &str,
     state: &mut FsState,
@@ -24,28 +27,42 @@ pub async fn execute_command(
     engine: &mut UltraFSEngine,
     concurrency: &AdaptiveConcurrencyManager,
 ) -> bool {
-    let parts: Vec<&str> = line.trim().split_whitespace().collect();
+    let parts: Vec<&str> = line.split_whitespace().collect();
 
     if parts.is_empty() {
         return true;
     }
 
     match parts[0] {
-        // System & Monitoring
+        // System and monitoring.
         "help" => cmd_sys::handle_help(),
+
         "monitor" => cmd_sys::handle_monitor(state).await,
+
         "info" => cmd_sys::handle_info(state),
+
         "stats" => cmd_sys::handle_stats(engine),
+
         "clear" => cmd_sys::handle_clear(),
 
-        // Node & Context Management
+        "verify" => cmd_sys::handle_verify(state),
+
+        "recover" | "data-recover" => {
+            cmd_sys::handle_auto_recover(state, allocator);
+        }
+
+        // Node and context management.
         "spawn" => cmd_node::handle_spawn(state, &parts),
+
         "focus" => cmd_node::handle_focus(state, &parts),
+
         "link" => cmd_node::handle_link(state, &parts),
-        "list" => cmd_node::handle_list(state),
+
+        "list" | "ls" => cmd_node::handle_list(state),
+
         "graph" => cmd_node::handle_graph(state),
 
-        // File I/O
+        // File I/O.
         "write" => {
             cmd_io::handle_write(state, tx, allocator, concurrency, &parts).await;
         }
@@ -54,15 +71,15 @@ pub async fn execute_command(
             cmd_io::handle_ingest(state, engine, tx, allocator, &parts).await;
         }
 
-        "read" | "cat" => cmd_io::handle_read(state, engine, &parts),
+        "read" | "cat" => {
+            cmd_io::handle_read(state, engine, &parts);
+        }
 
         "rm" | "delete" => {
             cmd_io::handle_remove(state, allocator, &parts);
         }
 
-        "exit" => return cmd_io::handle_exit(state, tx).await,
-
-        // State Checkpoints & Rollbacks
+        // Checkpoints and rollback.
         "checkpoint" | "snap" => {
             cmd_snap::handle_checkpoint(state);
         }
@@ -71,10 +88,19 @@ pub async fn execute_command(
             cmd_snap::handle_rollback(state, allocator);
         }
 
-        // Hardware Introspection
-        "diskinfo" => cmd_hw::handle_diskinfo(&parts),
+        // Hardware introspection.
+        "diskinfo" => {
+            cmd_hw::handle_diskinfo(&parts);
+        }
 
-        _ => println!("{}", "Unknown command. Type 'help' for options.".red()),
+        // Exit is handled here; false causes the REPL to stop.
+        "exit" => {
+            return cmd_io::handle_exit(state, tx).await;
+        }
+
+        _ => {
+            println!("{}", "Unknown command. Type 'help' for options.".red());
+        }
     }
 
     true

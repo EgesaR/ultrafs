@@ -96,26 +96,26 @@ pub fn handle_list(state: &FsState) {
         for name in state.index.keys() {
             println!("  {} {}", "📄".cyan(), name);
         }
-    } else if let Some(hash) = state.index.get(&state.active_context) {
-        if let Some(node) = state.nodes.get(hash) {
-            match node {
-                Node::Workbench { active_nodes, .. }
-                | Node::Collection {
-                    items: active_nodes,
-                    ..
-                } => {
-                    for item_hash in active_nodes {
-                        let item_name = state
-                            .index
-                            .iter()
-                            .find(|(_, h)| *h == item_hash)
-                            .map(|(n, _)| n.as_str())
-                            .unwrap_or("Unknown");
-                        println!("  {} {}", "🔗".magenta(), item_name);
-                    }
+    } else if let Some(hash) = state.index.get(&state.active_context)
+        && let Some(node) = state.nodes.get(hash)
+    {
+        match node {
+            Node::Workbench { active_nodes, .. }
+            | Node::Collection {
+                items: active_nodes,
+                ..
+            } => {
+                for item_hash in active_nodes {
+                    let item_name = state
+                        .index
+                        .iter()
+                        .find(|(_, h)| *h == item_hash)
+                        .map(|(n, _)| n.as_str())
+                        .unwrap_or("Unknown");
+                    println!("  {} {}", "🔗".magenta(), item_name);
                 }
-                _ => println!("  (Not a container)"),
             }
+            _ => println!("  (Not a container)"),
         }
     }
     println!();

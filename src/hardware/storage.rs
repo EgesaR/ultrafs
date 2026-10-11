@@ -116,3 +116,12 @@ impl UltraStorage {
         Ok(())
     }
 }
+
+impl std::fmt::Debug for AlignedBlock {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AlignedBlock")
+            .field("ptr", &self.ptr)
+            .field("layout_size", &self.layout.size())
+            .finish()
+    }
+}

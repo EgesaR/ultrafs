@@ -31,16 +31,19 @@ pub struct FsState {
     pub block_refs: HashMap<u64, usize>,
 
     /// Historical filesystem snapshots.
-    pub snapshots: Vec<(
-        HashMap<String, HashId>,
-        HashMap<HashId, Node>,
-        HashMap<String, FileNode>,
-        HashMap<u64, usize>,
-    )>,
+    pub snapshots: Vec<FsSnapshot>,
 
     /// Currently active filesystem context.
     pub active_context: String,
 }
+
+/// Historical filesystem snapshot contents.
+pub type FsSnapshot = (
+    HashMap<String, HashId>,
+    HashMap<HashId, Node>,
+    HashMap<String, FileNode>,
+    HashMap<u64, usize>,
+);
 
 impl FsState {
     pub fn new() -> Self {
