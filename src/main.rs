@@ -217,13 +217,13 @@ fn main() {
                     }
 
                     IoCommand::SyncCache | IoCommand::Sync => {
-                        // TODO: Call the actual flush/fsync method exposed
-                        // by UltraStorage. This message alone is not a flush.
-                        eprintln!(
-                            "{}",
-                            "[IO-ACTOR] Sync requested, but the physical flush API is not wired in."
-                                .yellow()
-                        );
+                        match storage.device.sync_all() {
+                            Ok(()) => {
+                                print_status(Status::Success, "[IO-ACTOR] Hardware cache synchronized via fsync().");
+                            } Err(error)=>{
+                                eprintln!("{}", format!("[IO-ACTOR] Failed to synchronize storage: {}", error).red())
+                            }
+                        }
                     }
 
                     IoCommand::Shutdown => {

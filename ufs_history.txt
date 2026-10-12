@@ -1,8 +1,4 @@
 #V2
-help
-exit
-list
-exit
 write test.txt "hello world and beyond"
 list
 exit
@@ -98,4 +94,8 @@ ingest large_doc High-performance immutable block streams with FastCDC chunking 
 read system_architecture
 verify
 stats
+exit
+ls
+graph
+help
 exit

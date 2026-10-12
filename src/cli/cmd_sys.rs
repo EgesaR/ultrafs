@@ -245,3 +245,163 @@ pub fn handle_verify(state: &FsState) {
         );
     }
 }
+
+pub fn handle_search(state: &FsState, parts: &[&str]) {
+    let query = parts.get(1).copied().unwrap_or("");
+    if query.is_empty() {
+        print_status(Status::Error, "Usage: search <keyword>");
+        return;
+    }
+
+    print_status(
+        Status::System,
+        &format!("ULTRAFS / INDEX SEARCH ('{}')", query),
+    );
+    let mut matches = 0;
+
+    for (name, _) in &state.index {
+        if name.contains(query) {
+            print_tree(false, &format!("Found matching node: '{}'", name));
+            matches += 1;
+        }
+    }
+
+    print_status(
+        Status::Success,
+        &format!("Search complete. Found {} matches.", matches),
+    );
+}
+
+pub fn handle_dag_dump(state: &FsState) {
+    print_status(Status::System, "ULTRAFS / MERKLE DAG INSPECTOR");
+
+    print_tree(false, &format!("Total active nodes: {}", state.nodes.len()));
+
+    print_tree(
+        false,
+        &format!("Total block reference entries: {}", state.block_refs.len()),
+    );
+
+    for (hash, node) in &state.nodes {
+        // HashId is [u8; 32], so encode it as hexadecimal.
+        let hash_str = blake3::Hash::from_bytes(*hash).to_hex().to_string();
+
+        let prefix = &hash_str[..8];
+
+        match node {
+            Node::File {
+                name, size, blocks, ..
+            } => {
+                print_tree(
+                    true,
+                    &format!(
+                        "File [{}] -> Name: '{}' | Size: {} B | Sectors: {:?}",
+                        prefix, name, size, blocks
+                    ),
+                );
+            }
+
+            Node::Folder { children } => {
+                print_tree(
+                    true,
+                    &format!("Folder [{}] -> Children: {}", prefix, children.len()),
+                );
+            }
+
+            Node::Collection { name, items } => {
+                print_tree(
+                    true,
+                    &format!(
+                        "Collection [{}] -> Name: '{}' | Items: {}",
+                        prefix,
+                        name,
+                        items.len()
+                    ),
+                );
+            }
+
+            Node::Workbench {
+                active_nodes,
+                session_id,
+                shared_env,
+            } => {
+                print_tree(
+                    true,
+                    &format!(
+                        "Workbench [{}] -> Session: '{}' | Active nodes: {} | Shared env vars: {}",
+                        prefix,
+                        session_id,
+                        active_nodes.len(),
+                        shared_env.len()
+                    ),
+                );
+            }
+
+            Node::Snapshot {
+                root_hash,
+                timestamp,
+            } => {
+                let root_prefix = blake3::Hash::from_bytes(*root_hash).to_hex().to_string();
+
+                print_tree(
+                    true,
+                    &format!(
+                        "Snapshot [{}] -> Root: {} | Timestamp: {}",
+                        prefix,
+                        &root_prefix[..8],
+                        timestamp
+                    ),
+                );
+            }
+        }
+    }
+
+    print_status(Status::Success, "DAG inspection dump finished.");
+}
+
+pub fn handle_compression_stats(state: &FsState, engine: &UltraFSEngine) {
+    print_status(
+        Status::System,
+        "ULTRAFS / COMPRESSION & DEDUPLICATION METRICS",
+    );
+
+    let total_nodes = state.nodes.len();
+    let unique_blocks = state.block_refs.len();
+
+    // Count total references vs unique sectors
+    let total_references: usize = state.block_refs.values().copied().sum();
+
+    let (cache_bytes, cached_chunks) = engine.cache_stats();
+
+    print_tree(false, &format!("Total Indexed Nodes : {}", total_nodes));
+    print_tree(
+        false,
+        &format!("Unique Physical Sectors: {}", unique_blocks),
+    );
+    print_tree(
+        false,
+        &format!("Total Block References : {}", total_references),
+    );
+    print_tree(
+        false,
+        &format!(
+            "RAM Compressed Cache : {} bytes across {} chunks",
+            cache_bytes, cached_chunks
+        ),
+    );
+
+    if unique_blocks > 0 {
+        let dedup_ratio = total_references as f64 / unique_blocks as f64;
+        print_tree(
+            true,
+            &format!("Deduplication Efficiency Ratio: {:.2}x", dedup_ratio),
+        );
+    } else {
+        print_tree(
+            true,
+            "Deduplication Efficiency Ratio: 1.00x (No blocks allocated)",
+        );
+    }
+
+    print_status(Status::Success, "Metrics analysis completed.");
+}

@@ -2,6 +2,7 @@ use colored::*;
 use std::sync::Arc;
 
 use super::helpers::inject_into_context;
+use crate::cli::ui::{Status, print_status, print_tree};
 use crate::graph::metadata::Node;
 use crate::graph::state::FsState;
 use crate::hardware::allocator::BlockAllocator;
@@ -234,4 +235,73 @@ pub fn handle_delete(state: &mut FsState, allocator: &Arc<BlockAllocator>, parts
     } else {
         println!("\n{} File '{}' not found.\n", "❌".red(), filename);
     }
+}
+
+pub fn handle_chmod(state: &mut FsState, parts: &[&str]) {
+    // Syntax: chmod <permissions> <filename>
+    // Example: chmod rwxr-xr-x system_architecture
+
+    let new_perms = parts.get(1).copied().unwrap_or("");
+    let filename = parts.get(2).copied().unwrap_or("");
+
+    if new_perms.is_empty() || filename.is_empty() {
+        print_status(Status::Error, "Usage: chmod <permissions> <filename>");
+        return;
+    }
+
+    let Some(&hash) = state.index.get(filename) else {
+        print_status(
+            Status::Error,
+            &format!("File or node '{}' not found", filename),
+        );
+        return;
+    };
+
+    // Update permissions only on file nodes, because Folder
+    // does not currently define SysAttributes.
+    let (name, old_perms, updated_perms) = match state.nodes.get_mut(&hash) {
+        Some(Node::File {
+            attributes, name, ..
+        }) => {
+            let old_perms = std::mem::replace(&mut attributes.permissions, new_perms.to_owned());
+
+            (name.clone(), old_perms, attributes.permissions.clone())
+        }
+
+        Some(Node::Folder { .. }) => {
+            print_status(
+                Status::Error,
+                "Cannot change folder permissions: Folder nodes do not have permission attributes.",
+            );
+            return;
+        }
+
+        Some(_) => {
+            print_status(
+                Status::Error,
+                &format!(
+                    "'{}' is not a file node that supports permissions.",
+                    filename
+                ),
+            );
+            return;
+        }
+
+        None => {
+            print_status(Status::Error, "Node reference missing from state table.");
+            return;
+        }
+    };
+
+    print_status(Status::System, "ULTRAFS / ACCESS CONTROL");
+    print_tree(false, &format!("Target Node: '{}'", name));
+    print_tree(false, &format!("Previous Permissions: {}", old_perms));
+    print_tree(true, &format!("Updated Permissions:  {}", updated_perms));
+
+    state.auto_checkpoint();
+
+    print_status(
+        Status::Success,
+        "Permissions updated and state checkpointed.",
+    );
 }
