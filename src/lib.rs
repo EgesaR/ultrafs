@@ -8,3 +8,4 @@ pub mod hardware;
 
 // Re-export IoCommand at the crate root so `crate::IoCommand` resolves correctly across modules
 pub use hardware::io_worker::IoCommand;
+pub mod python_bindings;
