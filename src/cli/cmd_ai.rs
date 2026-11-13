@@ -1,9 +1,9 @@
-
 use crate::{
-    ai::LatentEngine,
+    ai::{LatentEngine, LatentQuark},
     cli::ui::{Status, print_status, print_tree},
     graph::state::FsState,
 };
+use std::collections::HashMap;
 
 pub async fn handle_ai_reconstruct(state: &FsState, parts: &[&str]) {
     let filename = parts.get(1).copied().unwrap_or("");
@@ -14,23 +14,15 @@ pub async fn handle_ai_reconstruct(state: &FsState, parts: &[&str]) {
     }
 
     let Some(hash) = state.index.get(filename) else {
-        print_status(
-            Status::Error,
-            &format!("File '{}' not found", filename),
-        );
+        print_status(Status::Error, &format!("File '{}' not found", filename));
         return;
     };
 
     let Some(crate::graph::metadata::Node::File {
-        size,
-        attributes,
-        ..
+        size, attributes, ..
     }) = state.nodes.get(hash)
     else {
-        print_status(
-            Status::Error,
-            &format!("'{}' is not a file node", filename),
-        );
+        print_status(Status::Error, &format!("'{}' is not a file node", filename));
         return;
     };
 
@@ -49,20 +41,11 @@ pub async fn handle_ai_reconstruct(state: &FsState, parts: &[&str]) {
 
     let entropy_score = attributes.entropy_score;
 
-    print_status(
-        Status::System,
-        "ULTRAFS / NEURAL LATENT RECONSTRUCTION",
-    );
+    print_status(Status::System, "ULTRAFS / NEURAL LATENT RECONSTRUCTION");
 
-    print_tree(
-        false,
-        &format!("Target file size: {} bytes", target_size),
-    );
+    print_tree(false, &format!("Target file size: {} bytes", target_size));
 
-    print_tree(
-        false,
-        &format!("Entropy score: {:.2}", entropy_score),
-    );
+    print_tree(false, &format!("Entropy score: {:.2}", entropy_score));
 
     print_tree(
         true,
@@ -72,8 +55,7 @@ pub async fn handle_ai_reconstruct(state: &FsState, parts: &[&str]) {
     // The closure captures target_size by value, not a reference
     // into FsState.
     let inference_result = tokio::task::spawn_blocking(move || {
-        let engine =
-            LatentEngine::new().map_err(|error| error.to_string())?;
+        let engine = LatentEngine::new().map_err(|error| error.to_string())?;
 
         let dummy_seed = vec![120_u8; target_size];
 
@@ -93,10 +75,7 @@ pub async fn handle_ai_reconstruct(state: &FsState, parts: &[&str]) {
                 ),
             );
 
-            print_status(
-                Status::Success,
-                "Latent space projection complete.",
-            );
+            print_status(Status::Success, "Latent space projection complete.");
         }
 
         Ok(Err(error)) => {
@@ -113,4 +92,36 @@ pub async fn handle_ai_reconstruct(state: &FsState, parts: &[&str]) {
             );
         }
     }
+}
+
+pub async fn handle_ai_search(
+    state: &FsState,
+    engine: &LatentEngine,
+    quark_store: &HashMap<[u8; 32], LatentQuark>,
+    parts: &[&str],
+) {
+    if parts.len() < 2 {
+        println!("Usage: semsearch <search query phrase>");
+        return;
+    }
+
+    let query_phrase = parts[1..].join(" ");
+    let query_vec = engine.text_to_query_vector(&query_phrase);
+
+    println!("◆ STAR DUST / SEMANTIC SEARCH ('{}')", query_phrase);
+    let results = state.search_semantic(&query_vec, 0.05, quark_store);
+
+    if results.is_empty() {
+        println!("└─ No semantic matches found above similarity threshold.");
+    } else {
+        for (i, res) in results.iter().enumerate() {
+            println!(
+                "└─ [{}] '{}' (Similarity Score: {:.4})",
+                i + 1,
+                res.filename,
+                res.similarity_score
+            );
+        }
+    }
+    println!("✓ Semantic query completed.");
 }

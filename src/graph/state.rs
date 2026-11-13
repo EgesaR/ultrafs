@@ -3,6 +3,7 @@
 use crate::graph::metadata::{HashId, Node};
 use im::HashMap;
 use serde::{Deserialize, Serialize};
+use crate::ai::latent::LatentQuark;
 
 /// Represents a file and its ordered Merkle DAG chunks.
 #[derive(Clone, Serialize, Deserialize, Debug)]
@@ -122,5 +123,77 @@ impl FsState {
         } else {
             Err("FATAL: No stable snapshots available. DAG is entirely compromised.")
         }
+    }
+}
+
+impl LatentQuark {
+    /// Computes cosine similarity between this lQ and a target vector
+    pub fn cosine_similarity(&self, query: &[f32]) -> f32 {
+        if self.latent_vector.len() != query.len() || self.latent_vector.is_empty() {
+            return 0.0;
+        }
+
+        let mut dot_product = 0.0;
+        let mut norm_a = 0.0;
+        let mut norm_b = 0.0;
+
+        for i in 0..self.latent_vector.len() {
+            dot_product += self.latent_vector[i] * query[i];
+            norm_a += self.latent_vector[i] * self.latent_vector[i];
+            norm_b += query[i] * query[i];
+        }
+
+        if norm_a == 0.0 || norm_b == 0.0 {
+            return 0.0;
+        }
+
+        dot_product / (norm_a.sqrt() * norm_b.sqrt())
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize, Debug)]
+pub struct SemanticSearchResult {
+    pub filename: String,
+    pub similarity_score: f32,
+}
+
+impl FsState {
+    /// Searches files by evaluating cosine similarity against lQs across file chunks without decompression
+    pub fn search_semantic(
+        &self,
+        query_vector: &[f32],
+        min_threshold: f32,
+        quark_store: &std::collections::HashMap<[u8; 32], LatentQuark>,
+    ) -> Vec<SemanticSearchResult> {
+        let mut matches = Vec::new();
+
+        // Iterate through your file registry directly
+        for (filename, file_node) in &self.files {
+            let mut max_similarity = 0.0;
+
+            // Check each 32-byte chunk hash linked in the FileNode
+            for chunk_hash in &file_node.chunks {
+                if let Some(quark) = quark_store.get(chunk_hash) {
+                    let score = quark.cosine_similarity(query_vector);
+                    if score > max_similarity {
+                        max_similarity = score;
+                    }
+                }
+            }
+            if max_similarity >= min_threshold {
+                matches.push(SemanticSearchResult {
+                    filename: filename.clone(),
+                    similarity_score: max_similarity,
+                });
+            }
+        }
+
+        // Sort results by highest relevance score descending
+        matches.sort_by(|a, b| {
+            b.similarity_score
+                .partial_cmp(&a.similarity_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        matches
     }
 }

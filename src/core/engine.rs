@@ -6,6 +6,7 @@ use tokio::sync::mpsc::Sender;
 
 use crate::{
     IoCommand,
+    ai::{LatentEngine, LatentQuark},
     cache::{CacheError, CompressedLruCache},
     fastcdc::FastCDC,
     hardware::allocator::BlockAllocator,
@@ -24,6 +25,10 @@ pub struct UltraFSEngine {
     // Optional: Keep track of all known chunks in this session/DAG
     node_registry: HashMap<Hash, usize>,
 
+    // Star Dust AI Latent Storage Additions
+    pub latent_engine: LatentEngine,
+    pub quark_store: HashMap<[u8; 32], LatentQuark>,
+
     // Hardware tracking for disk eviction
     _allocator: Arc<BlockAllocator>,
     _io_tx: Sender<IoCommand>,
@@ -37,17 +42,32 @@ impl UltraFSEngine {
         allocator: Arc<BlockAllocator>,
         io_tx: Sender<IoCommand>,
     ) -> Self {
+        let latent_engine =
+            LatentEngine::new().expect("Failed to initialize Star Dust LatentEngine");
+
         Self {
             chunker: FastCDC::new(512, 2048, 4096),
             ram_cache: CompressedLruCache::new(cache_max_bytes),
             node_registry: HashMap::new(),
+            latent_engine,
+            quark_store: HashMap::new(),
             _allocator: allocator,
             _io_tx: io_tx,
             disk_registry: HashMap::new(),
         }
     }
 
-    /// Ingests a raw file payload, chunks it, hashes it and stages it in RAM.
+    /// Getter for the internal neural latent inference engine
+    pub fn latent_engine(&self) -> &LatentEngine {
+        &self.latent_engine
+    }
+
+    /// Getter for the persistent Latent Quark store
+    pub fn quark_store(&self) -> &HashMap<[u8; 32], LatentQuark> {
+        &self.quark_store
+    }
+
+    /// Ingests a raw file payload, chunks it, hashes it, generates Latent Quarks and stages it in RAM.
     /// Returns the ordered list of DAG nodes that make up this file.
     pub fn ingest_payload(&mut self, data: &[u8]) -> Result<Vec<DagNode>, CacheError> {
         let chunks = self.chunker.chunkify(data);
@@ -58,8 +78,24 @@ impl UltraFSEngine {
 
             // 1. Generate the cryptographic content address (Merkle Node ID)
             let hash = blake3::hash(slice);
+            let quark_id = *hash.as_bytes();
 
-            // 2. Block-Level Deduplication Check (RAM or Disk)
+            // Gemerate Neural Latent Quark (lQ) coordinates via forward pass
+            let latent_vector = self
+                .latent_engine
+                .forward_encode(slice)
+                .unwrap_or_else(|_| vec![0.0f32; 64]);
+
+            let quark = LatentQuark {
+                quark_id,
+                latent_vector,
+                original_size: chunk.length,
+            };
+
+            // Stage Quark in the persistent quark store
+            self.quark_store.insert(quark_id, quark);
+
+            // Block-Level Deduplication Check (RAM or Disk)
             if self.node_registry.contains_key(&hash) || self.disk_registry.contains_key(&hash) {
                 files_nodes.push(DagNode {
                     hash,
@@ -68,7 +104,7 @@ impl UltraFSEngine {
                 continue;
             }
 
-            // 3. Compress and stage in the bounded LRU Cache
+            // Compress and stage in the bounded LRU Cache
             self.ram_cache.put(hash, slice)?;
             self.node_registry.insert(hash, chunk.length);
 

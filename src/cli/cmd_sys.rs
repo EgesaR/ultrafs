@@ -81,6 +81,10 @@ pub fn handle_help() {
         "recover".cyan()
     );
     println!(
+        "  {} <query>          : Run semantic vector search across files",
+        "semsearch".cyan()
+    );
+    println!(
         "  {}                         : Persist the state and shut down\n",
         "exit".cyan()
     );

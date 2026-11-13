@@ -99,6 +99,10 @@ pub async fn execute_command(
             cmd_ai::handle_ai_reconstruct(state, &parts).await;
         }
 
+        "semsearch" | "search-semantic" => {
+            cmd_ai::handle_ai_search(state, &engine.latent_engine(), engine.quark_store(), &parts).await;
+        }
+
         // Advanced system inspection
         "search" | "find" => {
             cmd_sys::handle_search(state, &parts);
