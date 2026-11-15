@@ -35,6 +35,9 @@ impl CommandCompleter {
                 "list".into(),
                 "graph".into(),
                 "clear".into(),
+                "ai-construct".into(),
+                "semsearch".into(),
+                "sembench".into(),
                 "exit".into(),
             ],
         }

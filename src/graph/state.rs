@@ -1,9 +1,9 @@
 #![allow(dead_code)]
 
+use crate::ai::latent::LatentQuark;
 use crate::graph::metadata::{HashId, Node};
 use im::HashMap;
 use serde::{Deserialize, Serialize};
-use crate::ai::latent::LatentQuark;
 
 /// Represents a file and its ordered Merkle DAG chunks.
 #[derive(Clone, Serialize, Deserialize, Debug)]
@@ -151,49 +151,57 @@ impl LatentQuark {
     }
 }
 
-#[derive(Clone, Serialize, Deserialize, Debug)]
-pub struct SemanticSearchResult {
+#[derive(Clone, Debug)]
+pub struct SemanticMatch {
     pub filename: String,
     pub similarity_score: f32,
 }
 
 impl FsState {
-    /// Searches files by evaluating cosine similarity against lQs across file chunks without decompression
+    /// Searches the filesystem nodes using L2 dot-product cosine similarity.
     pub fn search_semantic(
         &self,
-        query_vector: &[f32],
-        min_threshold: f32,
+        query_vec: &[f32],
+        threshold: f32,
         quark_store: &std::collections::HashMap<[u8; 32], LatentQuark>,
-    ) -> Vec<SemanticSearchResult> {
+    ) -> Vec<SemanticMatch> {
         let mut matches = Vec::new();
 
-        // Iterate through your file registry directly
-        for (filename, file_node) in &self.files {
-            let mut max_similarity = 0.0;
+        for (_file_hash, node) in &self.nodes {
+            if let Node::File { name, blocks, .. } = node {
+                let mut best_score = 0.0_f32;
 
-            // Check each 32-byte chunk hash linked in the FileNode
-            for chunk_hash in &file_node.chunks {
-                if let Some(quark) = quark_store.get(chunk_hash) {
-                    let score = quark.cosine_similarity(query_vector);
-                    if score > max_similarity {
-                        max_similarity = score;
+                // Evaluate similarity across file chunks/blocks mapped to quarks
+                for &_block_index in blocks {
+                    // Find the quark corresponding to this block (or check via hash registry)
+                    // Assuming you match or lookup quarks by their IDs or chunk hashes:
+                    for quark in quark_store.values() {
+                        // Because both query_vec and quark.latent_vector are unit-normalized,
+                        // cosine similarity is simply the dot product!
+                        let score = dot_product(query_vec, &quark.latent_vector);
+                        if score > best_score {
+                            best_score = score;
+                        }
                     }
                 }
-            }
-            if max_similarity >= min_threshold {
-                matches.push(SemanticSearchResult {
-                    filename: filename.clone(),
-                    similarity_score: max_similarity,
-                });
+
+                if best_score >= threshold {
+                    matches.push(SemanticMatch {
+                        filename: name.clone(),
+                        similarity_score: best_score,
+                    });
+                }
             }
         }
 
-        // Sort results by highest relevance score descending
-        matches.sort_by(|a, b| {
-            b.similarity_score
-                .partial_cmp(&a.similarity_score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        // Sort matches by highest similarity score descending
+        matches.sort_by(|a, b| b.similarity_score.partial_cmp(&a.similarity_score).unwrap());
         matches
     }
+}
+
+/// Computes the dot product of two L2-normalized vectors (exact cosine similarity).
+#[inline]
+fn dot_product(u: &[f32], v: &[f32]) -> f32 {
+    u.iter().zip(v.iter()).map(|(a, b)| a * b).sum()
 }

@@ -1,6 +1,7 @@
 use blake3::Hash;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
+use std::path::Path;
 use std::{collections::HashMap, sync::Arc};
 use tokio::sync::mpsc::Sender;
 
@@ -45,16 +46,69 @@ impl UltraFSEngine {
         let latent_engine =
             LatentEngine::new().expect("Failed to initialize Star Dust LatentEngine");
 
-        Self {
+        // Automatically load persistent quark store from disk if it exists
+        let quark_store = Self::load_quark_store("quark_store.bin");
+
+        let mut engine = Self {
             chunker: FastCDC::new(512, 2048, 4096),
             ram_cache: CompressedLruCache::new(cache_max_bytes),
             node_registry: HashMap::new(),
             latent_engine,
-            quark_store: HashMap::new(),
+            quark_store,
             _allocator: allocator,
             _io_tx: io_tx,
             disk_registry: HashMap::new(),
+        };
+
+        // Fallback: Index any active cache blocks if quark store was empty
+        if engine.quark_store.is_empty() {
+            engine.rebuild_quark_store_from_cache();
         }
+
+        engine
+    }
+
+    /// Rebuilds latent quarks from active cache blocks upon startup
+    pub fn rebuild_quark_store_from_cache(&mut self) {
+        // Collect existing hashes from node_registry or ram_cache keys
+        let hashes: Vec<Hash> = self.node_registry.keys().cloned().collect();
+
+        for hash in hashes {
+            if let Ok(Some(data)) = self.ram_cache.get(&hash) {
+                let quark_id = *hash.as_bytes();
+                if let Ok(latent_vector) = self.latent_engine.forward_encode(&data) {
+                    let quark = LatentQuark {
+                        quark_id,
+                        latent_vector,
+                        original_size: data.len(),
+                    };
+                    self.quark_store.insert(quark_id, quark);
+                }
+            }
+        }
+    }
+
+    /// Saves the current quark store to disk for persistence across reboots
+    pub fn save_quark_store(&self, path: &str) -> Result<(), String> {
+        let encoded = bincode::serialize(&self.quark_store)
+            .map_err(|e| format!("Failed to serialize quark store: {}", e))?;
+
+        std::fs::write(path, encoded)
+            .map_err(|e| format!("Failed to write quark store to disk: {}", e))?;
+
+        Ok(())
+    }
+
+    /// Loads the persistent quark store from disk if avaiable
+    pub fn load_quark_store(path: &str) -> HashMap<[u8; 32], LatentQuark> {
+        if Path::new(path).exists() {
+            if let Ok(bytes) = std::fs::read(path) {
+                if let Ok(decoded) = bincode::deserialize(&bytes) {
+                    return decoded;
+                }
+            }
+        }
+        HashMap::new()
     }
 
     /// Getter for the internal neural latent inference engine

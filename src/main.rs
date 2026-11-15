@@ -2,7 +2,8 @@ use bincode::Options;
 use colored::*;
 use rustyline::error::ReadlineError;
 use rustyline::history::DefaultHistory;
-use rustyline::{Config, Editor};
+use rustyline::{Config, Editor, ExternalPrinter};
+use std::io::{self, Write};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use ultrafs::{IoCommand, cli, core, graph, hardware};
@@ -187,60 +188,91 @@ fn main() {
 
         print_status(Status::System, "Adaptive Concurrency Manager connected.");
 
+        // Configure the interactive shell and persistent history.
+        let config = Config::builder().auto_add_history(true).build();
+
+        let mut rl: Editor<CommandCompleter, DefaultHistory> =
+            Editor::with_config(config).expect("Failed to initialize Rustyline");
+
+        // Create external printer optionally; falls back gracefully if piped/non-TTY (ENOTTY)
+        let external_printer = rl.create_external_printer().ok();
+
         // The actor owns UltraStorage and processes commands sequentially.
         let io_task = tokio::spawn(async move {
             let mut storage = storage;
             let mut rx = rx;
+            let mut ext_printer = external_printer;
 
             while let Some(command) = rx.recv().await {
                 match command {
                     IoCommand::WriteBlock { index, block } => {
                         match storage.write_block(index, &block) {
                             Ok(()) => {
-                                println!(
-                                    "{}",
-                                    format!("[IO-ACTOR] Wrote storage block {}.", index).green()
-                                );
+                                // Optional: skip noisy block-level logs for high-index state dumps (> 0)
+                                // or ensure immediate flush so they don't mash together.
+                                let msg = format!("[IO-ACTOR] Wrote storage block {}.\n", index)
+                                    .green()
+                                    .to_string();
+                                if let Some(printer) = &mut ext_printer {
+                                    let _ = printer.print(msg);
+                                } else {
+                                    print!("{}", msg);
+                                    let _ = io::stdout().flush(); // Forces immediate flush even when piped
+                                }
                             }
 
                             Err(error) => {
-                                eprintln!(
-                                    "{}",
-                                    format!(
-                                        "[IO-ACTOR] Failed to write block {}: {}",
-                                        index, error
-                                    )
+                                let msg = format!(
+                                    "[IO-ACTOR] Failed to write block {}: {}\n",
+                                    index, error
+                                )
+                                .red()
+                                .to_string();
+                                if let Some(printer) = &mut ext_printer {
+                                    let _ = printer.print(msg);
+                                } else {
+                                    eprint!("{}", msg);
+                                    let _ = io::stderr().flush();
+                                }
+                            }
+                        }
+                    }
+                    IoCommand::SyncCache | IoCommand::Sync => match storage.device.sync_all() {
+                        Ok(()) => {
+                            let msg = "[IO-ACTOR] Hardware cache synchronized via fsync()."
+                                .green()
+                                .to_string();
+                            if let Some(printer) = &mut ext_printer {
+                                let _ = printer.print(msg);
+                            } else {
+                                println!("{}", msg);
+                            }
+                        }
+                        Err(error) => {
+                            let msg =
+                                format!("[IO-ACTOR] Failed to synchronize storage: {}", error)
                                     .red()
-                                );
+                                    .to_string();
+                            if let Some(printer) = &mut ext_printer {
+                                let _ = printer.print(msg);
+                            } else {
+                                eprintln!("{}", msg);
                             }
                         }
-                    }
-
-                    IoCommand::SyncCache | IoCommand::Sync => {
-                        match storage.device.sync_all() {
-                            Ok(()) => {
-                                print_status(Status::Success, "[IO-ACTOR] Hardware cache synchronized via fsync().");
-                            } Err(error)=>{
-                                eprintln!("{}", format!("[IO-ACTOR] Failed to synchronize storage: {}", error).red())
-                            }
-                        }
-                    }
+                    },
 
                     IoCommand::Shutdown => {
-                        print_status(Status::System, "Storage I/O actor shutting down.");
+                        let msg = "Storage I/O actor shutting down.".to_string();
+                        if let Some(printer) = &mut ext_printer {
+                            let _ = printer.print(msg);
+                        } else {
+                            println!("{}", msg);
+                        }
                         break;
                     }
                 }
             }
-
-            // UltraStorage is dropped when the actor exits.
         });
-
-        // Configure the interactive shell and persistent history.
-        let config = Config::builder().auto_add_history(true).build();
-
-        let mut rl: Editor<CommandCompleter, DefaultHistory> =
-            Editor::with_config(config).expect("Failed to initialize Rustyline");
 
         if let Err(error) = rl.load_history("ufs_history.txt") {
             println!("{}", format!("[INFO] History not loaded: {}", error).cyan());
@@ -327,7 +359,7 @@ fn main() {
         // The "exit" command already invoked handle_exit() via execute_command.
         // EOF and Ctrl+C still need to trigger persistence.
         if !exit_command_handled {
-            let _ = cli::cmd_io::handle_exit(&state, &tx).await;
+            let _ = cli::cmd_io::handle_exit(&state, &engine, &tx).await;
         }
 
         // Queue shutdown after persistence writes on the same sender.

@@ -100,7 +100,18 @@ pub async fn execute_command(
         }
 
         "semsearch" | "search-semantic" => {
-            cmd_ai::handle_ai_search(state, &engine.latent_engine(), engine.quark_store(), &parts).await;
+            cmd_ai::handle_ai_search(state, &engine.latent_engine(), engine.quark_store(), &parts)
+                .await;
+        }
+
+        "sembench" | "search-bench" => {
+            cmd_ai::handle_ai_bench(
+                state,
+                engine.latent_engine(),
+                engine.quark_store(),
+                &parts,
+            )
+            .await;
         }
 
         // Advanced system inspection
@@ -122,7 +133,7 @@ pub async fn execute_command(
 
         // Exit is handled here; false causes the REPL to stop.
         "exit" => {
-            return cmd_io::handle_exit(state, tx).await;
+            return cmd_io::handle_exit(state, engine, tx).await;
         }
 
         _ => {

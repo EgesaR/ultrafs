@@ -1,4 +1,5 @@
 use bincode::Options;
+use indicatif::{ProgressBar, ProgressStyle};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use std::time::Instant;
@@ -239,6 +240,15 @@ pub async fn handle_ingest(
             let total_chunks = dag_nodes.len();
             let mut block_indices = Vec::with_capacity(total_chunks);
 
+            // Initialize progress bar for chunk processing
+            let pb = ProgressBar::new(total_chunks as u64);
+            pb.set_style(
+                ProgressStyle::default_bar()
+                    .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} chunks ({eta})")
+                    .unwrap()
+                    .progress_chars("#>-"),
+            );
+
             for (idx, node) in dag_nodes.iter().enumerate() {
                 let block_index =
                     if let Some(existing) = engine.disk_registry.get(&node.hash).copied() {
@@ -247,6 +257,7 @@ pub async fn handle_ingest(
                         let new_index = match allocator.allocate() {
                             Some(index) => index,
                             None => {
+                                pb.finish_with_message("Allocation failed");
                                 print_status(Status::Error, "Physical sector allocation failed.");
                                 return;
                             }
@@ -256,20 +267,18 @@ pub async fn handle_ingest(
 
                         let cached_data = match engine.ram_cache.get(&node.hash) {
                             Ok(Some(data)) => data,
-
                             Ok(None) => {
                                 allocator.free(new_index);
-
+                                pb.finish_with_message("Cache miss");
                                 print_status(
                                     Status::Error,
                                     &format!("Chunk {} was not found in the RAM cache.", idx),
                                 );
                                 return;
                             }
-
                             Err(error) => {
                                 allocator.free(new_index);
-
+                                pb.finish_with_message("Cache error");
                                 print_status(
                                     Status::Error,
                                     &format!("Could not retrieve chunk {}: {:?}", idx, error),
@@ -280,7 +289,7 @@ pub async fn handle_ingest(
 
                         if cached_data.len() > BLOCK_SIZE {
                             allocator.free(new_index);
-
+                            pb.finish_with_message("Block size exceeded");
                             print_status(
                                 Status::Error,
                                 &format!("Chunk {} exceeds the physical block size.", idx),
@@ -298,7 +307,7 @@ pub async fn handle_ingest(
                             .await
                         {
                             allocator.free(new_index);
-
+                            pb.finish_with_message("Queue write failed");
                             print_status(
                                 Status::Error,
                                 &format!("Could not queue chunk write: {}", error),
@@ -311,18 +320,10 @@ pub async fn handle_ingest(
                     };
 
                 block_indices.push(block_index);
-
-                let hash_string = node.hash.to_string();
-                let hash_prefix = &hash_string[..hash_string.len().min(8)];
-
-                print_tree(
-                    idx + 1 == total_chunks,
-                    &format!(
-                        "Chunk [{}]: Hash={}... | Size={} B | Sector={}",
-                        idx, hash_prefix, node.size, block_index
-                    ),
-                );
+                pb.inc(1); // Advance progress bar per chunk
             }
+
+            pb.finish_with_message("Chunks processed");
 
             let content_hash = hash_payload(bytes);
             let entropy = calculate_entropy(bytes);
@@ -365,7 +366,6 @@ pub async fn handle_ingest(
         }
     }
 }
-
 // -----------------------------------------------------------------------------
 // READ
 // -----------------------------------------------------------------------------
@@ -582,8 +582,23 @@ pub fn handle_remove(state: &mut FsState, allocator: &Arc<BlockAllocator>, parts
 // -----------------------------------------------------------------------------
 
 /// Queue a serialized filesystem snapshot and its superblock.
+/// Also flushes Star Dust latent indexes to disk.
 /// Returns false so execute_command() stops the REPL.
-pub async fn handle_exit(state: &FsState, tx: &mpsc::Sender<IoCommand>) -> bool {
+pub async fn handle_exit(
+    state: &FsState,
+    engine: &UltraFSEngine,
+    tx: &mpsc::Sender<IoCommand>,
+) -> bool {
+    println!("◆ Flushing Star Dust latent indexes to disk...");
+    if let Err(e) = engine.save_quark_store("quark_store.bin") {
+        eprintln!("⚠️ Warning: Failed to save quark store: {}", e);
+    } else {
+        println!(
+            "✓ Quark store successfully persisted ({} lQs saved).",
+            engine.quark_store.len()
+        );
+    }
+
     print_status(Status::System, "Persisting UltraFS state...");
 
     let encoder = bincode::DefaultOptions::new().with_limit(MAX_SERIALIZED_STATE_SIZE);

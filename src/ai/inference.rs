@@ -54,6 +54,14 @@ impl LatentEngine {
             }
         }
 
+        // Apply L2 normalization to ensure unit-norm vectors for dot-product similarity
+        let norm: f32 = accumulated_latent.iter().map(|v| v * v).sum::<f32>().sqrt();
+        if norm > 0.0 {
+            for v in &mut accumulated_latent {
+                *v /= norm;
+            }
+        }
+
         Ok(accumulated_latent)
     }
 
@@ -84,25 +92,11 @@ impl LatentEngine {
         reconstructed.truncate(seed.len());
         Ok(reconstructed)
     }
-    /// Converts a text query into a 64-dimensional float vector for semantic matching
+
+    /// Converts a text query into a 64-dimensional float vector via the neural encoder
     pub fn text_to_query_vector(&self, query_text: &str) -> Vec<f32> {
-        let mut vector = vec![0.0f32; 64];
-        let bytes = query_text.as_bytes();
-
-        // Project bytes into the 64-dim latent coordinate space deterministically
-        for (i, &b) in bytes.iter().enumerate() {
-            let idx = i % 64;
-            vector[idx] += (b as f32) / 255.0;
-        }
-
-        // Normalize the vector magnitude
-        let norm: f32 = vector.iter().map(|v| v * v).sum::<f32>().sqrt();
-        if norm > 0.0 {
-            for v in &mut vector {
-                *v /= norm;
-            }
-        }
-
-        vector
+        // Delegate directly to forward_encode so queries share the exact same neural space
+        self.forward_encode(query_text.as_bytes())
+            .unwrap_or_else(|_| vec![0.0f32; 64])
     }
 }
